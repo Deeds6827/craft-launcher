@@ -49,6 +49,27 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           cargo install cargo-deny --version 0.20.2 --locked
+      - name: Install maintained DirectX shader compiler
+        if: matrix.app == 'filmcraft' || matrix.app == 'effectcraft'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = Join-Path $env:RUNNER_TEMP 'dxc.zip'
+          $tools = Join-Path $env:RUNNER_TEMP 'dxc'
+          Invoke-WebRequest -Uri 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip' -OutFile $archive
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne 'ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1') { throw 'DXC release checksum mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $tools
+          $bin = Join-Path $tools 'bin/x64'
+          foreach ($name in @('dxc.exe','dxcompiler.dll','dxil.dll')) {
+            if (!(Test-Path -LiteralPath (Join-Path $bin $name))) { throw "Missing shader compiler dependency: $name" }
+          }
+          & (Join-Path $bin 'dxc.exe') --version
+          $bin >> $env:GITHUB_PATH
+          "DXC_TOOL_DIR=$bin" >> $env:GITHUB_ENV
+          "VERIFY_DXC_RELEASE=v1.9.2609" >> $env:GITHUB_ENV
+          "VERIFY_DXC_SHA=$digest" >> $env:GITHUB_ENV
       - name: Apply the exact candidate to its original source commit
         shell: pwsh
         run: |
@@ -103,9 +124,45 @@ jobs:
             compilationJobs = 4
             releaseCodegenUnits = 16
             releaseLTO = 'false'
+            shaderCompilerRelease = $env:VERIFY_DXC_RELEASE
+            shaderCompilerArchiveSHA256 = $env:VERIFY_DXC_SHA
           }
           $record | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'result.json')
           if ($result -ne 0) { throw "Repository CI failed with exit code $result" }
+      - name: Compare the same graphics tests with and without DXC
+        if: success() && matrix.app == 'filmcraft'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Set-Location -LiteralPath $env:VERIFY_SOURCE
+          $executables = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release/deps') -Filter 'golden-*.exe')
+          if ($executables.Count -ne 1) { throw 'Expected one exact golden integration-test binary' }
+          $test = $executables[0].FullName
+          $binaryDigest = (Get-FileHash -LiteralPath $test -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Location -LiteralPath (Join-Path $env:VERIFY_SOURCE 'crates/golden')
+          $savedPath = $env:PATH
+          try {
+            $env:PATH = (($savedPath -split ';') | Where-Object { $_.TrimEnd('\','/') -ne $env:DXC_TOOL_DIR.TrimEnd('\','/') }) -join ';'
+            & $test 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'shader-fxc.log')
+            $withoutDxc = $LASTEXITCODE
+          } finally {
+            $env:PATH = $savedPath
+          }
+          & $test 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'shader-dxc.log')
+          $withDxc = $LASTEXITCODE
+          $oldLog = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'shader-fxc.log') -Raw
+          [ordered]@{
+            command = @($test)
+            binarySHA256 = $binaryDigest
+            sameBinaryAfterProbe = ((Get-FileHash -LiteralPath $test -Algorithm SHA256).Hash.ToLowerInvariant() -eq $binaryDigest)
+            withoutDxcExitCode = $withoutDxc
+            withDxcExitCode = $withDxc
+            reproducedFxcFailure = ($withoutDxc -ne 0 -and $oldLog.Contains('FXC D3DCompile error'))
+            changedSource = $false
+            shaderCompilerRelease = $env:VERIFY_DXC_RELEASE
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'shader-probe.json')
+          if ($withDxc -ne 0) { throw 'Graphics tests failed with maintained shader compiler' }
       - name: Retain exact verification output
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -114,5 +171,8 @@ jobs:
           path: |
             ${{ runner.temp }}/ci.log
             ${{ runner.temp }}/result.json
+            ${{ runner.temp }}/shader-fxc.log
+            ${{ runner.temp }}/shader-dxc.log
+            ${{ runner.temp }}/shader-probe.json
           if-no-files-found: warn
           retention-days: 30
