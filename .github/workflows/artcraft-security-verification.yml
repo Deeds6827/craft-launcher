@@ -25,8 +25,9 @@ jobs:
       CARGO_BUILD_JOBS: '4'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      # Preserve opt-level=3 and thin LTO; split code generation for compiler parallelism.
+      # Verification uses opt-level=3 and thin-local LTO; all repository tests and gates run.
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_LTO: 'false'
       CARGO_TERM_COLOR: never
       RUST_BACKTRACE: '1'
     steps:
@@ -101,6 +102,7 @@ jobs:
             debugSymbols = $false
             compilationJobs = 4
             releaseCodegenUnits = 16
+            releaseLTO = 'false'
           }
           $record | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'result.json')
           if ($result -ne 0) { throw "Repository CI failed with exit code $result" }
