@@ -1,0 +1,593 @@
+diff --git a/crates/js/src/lib.rs b/crates/js/src/lib.rs
+index fd6ff82..b309077 100644
+--- a/crates/js/src/lib.rs
++++ b/crates/js/src/lib.rs
+@@ -200,6 +200,44 @@ struct Host {
+     console: Vec<String>,
+     requests: Vec<Request>,
+     doc: DocInfo,
++    output_bytes: usize,
++    output_count: usize,
++    request_storage: usize,
++}
++
++const MAX_HOST_MESSAGE_BYTES: usize = 64 * 1024;
++const MAX_HOST_OUTPUT_BYTES: usize = 1024 * 1024;
++const MAX_HOST_OUTPUT_COUNT: usize = 1024;
++
++impl Host {
++    fn charge_output(&mut self, bytes: usize) -> JsResult<()> {
++        if self.output_count >= MAX_HOST_OUTPUT_COUNT || bytes > MAX_HOST_OUTPUT_BYTES.saturating_sub(self.output_bytes) {
++            return Err(error("script host output limit exceeded"));
++        }
++        self.output_bytes += bytes;
++        self.output_count += 1;
++        Ok(())
++    }
++    fn request(&mut self, request: Request) -> JsResult<()> {
++        let bytes = match &request {
++            Request::Focus(s) | Request::Submit(s) | Request::LaunchUrl(s) => s.len(),
++            Request::Reset(names) => names.iter().map(String::len).sum(),
++            _ => 0,
++        };
++        // Preserve the existing million-element reset-array API while accounting for
++        // empty String slots as well as their payloads across repeated requests.
++        let storage = bytes.saturating_add(match &request {
++            Request::Reset(names) => names.len().saturating_mul(std::mem::size_of::<String>()),
++            _ => std::mem::size_of::<Request>(),
++        });
++        if storage > (32 * 1024 * 1024usize).saturating_sub(self.request_storage) {
++            return Err(error("script request storage limit exceeded"));
++        }
++        self.charge_output(bytes)?;
++        self.request_storage += storage;
++        self.requests.push(request);
++        Ok(())
++    }
+ }
+ 
+ type Shared = RefCell<Host>;
+@@ -220,6 +258,80 @@ fn text(v: &JsValue, ctx: &mut Context) -> JsResult<String> {
+     Ok(v.to_string(ctx)?.to_std_string_escaped())
+ }
+ 
++/// Bound the engine string before making an owned host copy. Coercion may call
++/// back into the host, so no Host borrow is held here.
++fn output_text(v: &JsValue, ctx: &mut Context) -> JsResult<String> {
++    if v.is_undefined() || v.is_null() {
++        return Ok(String::new());
++    }
++    let value = v.to_string(ctx)?;
++    bounded_host_string(&value).ok_or_else(|| error("script host message limit exceeded"))
++}
++
++fn bounded_host_string(value: &JsString) -> Option<String> {
++    if value.len() > MAX_HOST_MESSAGE_BYTES {
++        return None;
++    }
++    let text = value.to_std_string_escaped();
++    (text.len() <= MAX_HOST_MESSAGE_BYTES).then_some(text)
++}
++
++/// Error formatting must not execute JavaScript or recursively render arbitrary
++/// objects. Reserve one bounded diagnostic even when normal output is exhausted.
++fn diagnostic(e: &JsError) -> String {
++    const LIMIT: &str = "script diagnostic limit exceeded";
++    struct Bounded(String);
++    impl std::fmt::Write for Bounded {
++        fn write_str(&mut self, s: &str) -> std::fmt::Result {
++            if s.len() > MAX_HOST_MESSAGE_BYTES.saturating_sub(self.0.len()) {
++                return Err(std::fmt::Error);
++            }
++            self.0.push_str(s);
++            Ok(())
++        }
++    }
++    fn property(object: &JsObject, name: JsString) -> Option<JsValue> {
++        let key = name.into();
++        let mut current = Some(object.clone());
++        // Read data descriptors directly: getters and Proxy traps cannot run.
++        for _ in 0..32 {
++            let object = current?;
++            let borrowed = object.borrow();
++            if let Some(descriptor) = borrowed.properties().get(&key) {
++                return descriptor.value().cloned();
++            }
++            current = borrowed.prototype();
++        }
++        None
++    }
++    use std::fmt::Write;
++    let mut out = Bounded(String::new());
++    let written = if let Some(value) = e.as_opaque() {
++        if let Some(s) = value.as_string() {
++            let Some(s) = bounded_host_string(&s) else { return LIMIT.into() };
++            write!(&mut out, "{s:?}")
++        } else if let Some(object) = value.as_object() {
++            if object.is::<boa_engine::builtins::error::Error>() {
++                let name = property(&object, js_string!("name"));
++                let message = property(&object, js_string!("message"));
++                let name = name.and_then(|v| v.as_string()).map(|s| bounded_host_string(&s)).unwrap_or(Some("Error".into()));
++                let message = message.and_then(|v| v.as_string()).map(|s| bounded_host_string(&s)).unwrap_or(Some(String::new()));
++                let (Some(name), Some(message)) = (name, message) else { return LIMIT.into() };
++                write!(&mut out, "{name}: {message}")
++            } else {
++                out.write_str("script threw an object")
++            }
++        } else if value.is_bigint() || value.is_symbol() {
++            out.write_str("script threw a non-text value")
++        } else {
++            write!(&mut out, "{}", value.display())
++        }
++    } else {
++        write!(&mut out, "{e}")
++    };
++    if written.is_err() { LIMIT.into() } else { out.0 }
++}
++
+ fn arg(args: &[JsValue], i: usize) -> JsValue {
+     args.get(i).cloned().unwrap_or_default()
+ }
+@@ -436,7 +548,8 @@ fn field_object(ctx: &mut Context, name: &str) -> JsObject {
+         Ok(JsValue::undefined())
+     }
+     fn set_focus(_: &JsValue, _: &[JsValue], name: &JsString, c: &mut Context) -> JsResult<JsValue> {
+-        host(c)?.borrow_mut().requests.push(Request::Focus(name.to_std_string_escaped()));
++        let name = output_text(&JsValue::from(name.clone()), c)?;
++        host(c)?.borrow_mut().request(Request::Focus(name))?;
+         Ok(JsValue::undefined())
+     }
+ 
+@@ -489,13 +602,33 @@ fn get_nth_field_name(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRes
+ }
+ 
+ fn reset_form(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+-    let names = strings(&arg(args, 0), ctx)?;
+-    host(ctx)?.borrow_mut().requests.push(Request::Reset(names));
++    let value = arg(args, 0);
++    let mut names = Vec::new();
++    if let Some(object) = value.as_object().filter(|o| o.is_array()) {
++        let array = JsArray::from_object(object.clone())?;
++        let length = array.length(ctx)?;
++        if length > MAX_ARRAY_LENGTH {
++            return Err(error(format!("array length exceeds {MAX_ARRAY_LENGTH}")));
++        }
++        let mut total = 0usize;
++        for i in 0..length {
++            let item = array.get(i, ctx)?;
++            let name = output_text(&item, ctx)?;
++            total += name.len();
++            if total > MAX_HOST_OUTPUT_BYTES {
++                return Err(error("script host output limit exceeded"));
++            }
++            names.push(name);
++        }
++    } else if !value.is_undefined() && !value.is_null() {
++        names.push(output_text(&value, ctx)?);
++    }
++    host(ctx)?.borrow_mut().request(Request::Reset(names))?;
+     Ok(JsValue::undefined())
+ }
+ 
+ fn print(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+-    host(ctx)?.borrow_mut().requests.push(Request::Print);
++    host(ctx)?.borrow_mut().request(Request::Print)?;
+     Ok(JsValue::undefined())
+ }
+ 
+@@ -504,11 +637,11 @@ fn submit_form(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
+     let url = match a.as_object() {
+         Some(o) if !o.is_array() => {
+             let u = o.get(js_string!("cURL"), ctx)?;
+-            text(&u, ctx)?
++            output_text(&u, ctx)?
+         }
+-        _ => text(&a, ctx)?,
++        _ => output_text(&a, ctx)?,
+     };
+-    host(ctx)?.borrow_mut().requests.push(Request::Submit(url));
++    host(ctx)?.borrow_mut().request(Request::Submit(url))?;
+     Ok(JsValue::undefined())
+ }
+ 
+@@ -529,8 +662,8 @@ fn page_num_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
+     let mut h = host(ctx)?.borrow_mut();
+     let last = h.doc.num_pages.saturating_sub(1);
+     let p = (n.max(0.0) as usize).min(last);
++    h.request(Request::GoToPage(p))?;
+     h.doc.page = p;
+-    h.requests.push(Request::GoToPage(p));
+     Ok(JsValue::undefined())
+ }
+ 
+@@ -541,27 +674,34 @@ fn message(v: &JsValue, key: &str, ctx: &mut Context) -> JsResult<String> {
+     match v.as_object() {
+         Some(o) if !o.is_array() && !o.is_callable() => {
+             let m = o.get(JsString::from(key), ctx)?;
+-            text(&m, ctx)
++            output_text(&m, ctx)
+         }
+-        _ => text(v, ctx),
++        _ => output_text(v, ctx),
+     }
+ }
+ 
+ fn alert(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+-    let m = message(&arg(args, 0), "cMsg", ctx)?;
+-    host(ctx)?.borrow_mut().alerts.push(m);
++    let value = arg(args, 0);
++    let value = match value.as_object() {
++        Some(o) if !o.is_array() && !o.is_callable() => o.get(js_string!("cMsg"), ctx)?,
++        _ => value,
++    };
++    let m = output_text(&value, ctx)?;
++    let mut h = host(ctx)?.borrow_mut();
++    h.charge_output(m.len())?;
++    h.alerts.push(m);
+     // The OK button.
+     Ok(JsValue::from(1))
+ }
+ 
+ fn beep(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+-    host(ctx)?.borrow_mut().requests.push(Request::Beep);
++    host(ctx)?.borrow_mut().request(Request::Beep)?;
+     Ok(JsValue::undefined())
+ }
+ 
+ fn launch_url(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+     let u = message(&arg(args, 0), "cURL", ctx)?;
+-    host(ctx)?.borrow_mut().requests.push(Request::LaunchUrl(u));
++    host(ctx)?.borrow_mut().request(Request::LaunchUrl(u))?;
+     Ok(JsValue::undefined())
+ }
+ 
+@@ -571,8 +711,10 @@ fn response(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+ }
+ 
+ fn println(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+-    let m = text(&arg(args, 0), ctx)?;
+-    host(ctx)?.borrow_mut().console.push(m);
++    let m = output_text(&arg(args, 0), ctx)?;
++    let mut h = host(ctx)?.borrow_mut();
++    h.charge_output(m.len())?;
++    h.console.push(m);
+     Ok(JsValue::undefined())
+ }
+ 
+@@ -1128,6 +1270,9 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
+         console: Vec::new(),
+         requests: Vec::new(),
+         doc: doc.clone(),
++        output_bytes: 0,
++        output_count: 0,
++        request_storage: 0,
+     }));
+     let mut out = Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), ..Default::default() };
+     let result = (|| -> JsResult<()> {
+@@ -1139,7 +1284,11 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
+         }
+         let r = ctx.eval(Source::from_bytes(script))?;
+         if !r.is_undefined() {
+-            out.result = Some(text(&r, &mut ctx)?);
++            // Summarize oversized completion text explicitly; assignments to
++            // legitimate large form values must still finish normally.
++            let completion = bounded_host_string(&r.to_string(&mut ctx)?).unwrap_or_else(|| "[script completion exceeds message limit]".into());
++            host(&ctx)?.borrow_mut().charge_output(completion.len())?;
++            out.result = Some(completion);
+         }
+         let rc = ev.get(js_string!("rc"), &mut ctx)?;
+         out.rc = rc.to_boolean();
+@@ -1150,7 +1299,7 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
+         Ok(())
+     })();
+     if let Err(e) = result {
+-        out.error = Some(e.to_string());
++        out.error = Some(diagnostic(&e));
+     }
+     if let Some(h) = ctx.remove_data::<Shared>() {
+         let h = h.into_inner();
+diff --git a/crates/js/src/tests.rs b/crates/js/src/tests.rs
+index cb8b997..33a82d6 100644
+--- a/crates/js/src/tests.rs
++++ b/crates/js/src/tests.rs
+@@ -1,5 +1,50 @@
+ use super::*;
+ 
++#[test]
++fn host_output_rejects_oversized_messages_before_retaining_them() {
++    for call in ["console.println", "app.alert"] {
++        let out = go(&format!("{call}('x'.repeat(70_000));"), &Event::doc("Open"));
++        assert!(out.error.is_some(), "{call} must report the output limit");
++        assert!(out.console.is_empty() && out.alerts.is_empty());
++    }
++}
++
++#[test]
++fn empty_messages_cannot_bypass_the_host_output_budget() {
++    let out = go("for (var i = 0; i < 2048; i++) console.println('');", &Event::doc("Open"));
++    assert!(out.error.is_some());
++    assert!(out.console.len() <= 1024);
++}
++
++#[test]
++fn clearing_console_does_not_renew_the_output_budget() {
++    let out = go("for (var i = 0; i < 2048; i++) { console.println(''); console.clear(); }", &Event::doc("Open"));
++    assert!(out.error.is_some());
++}
++
++#[test]
++fn document_and_event_scripts_share_the_output_budget() {
++    let scripts = vec!["for (var i = 0; i < 700; i++) console.println('');".into()];
++    let out = run("for (var i = 0; i < 700; i++) app.alert('');", &Event::doc("Open"), &doc(), &fields(), &scripts, Limits::default());
++    assert!(out.error.is_some());
++    assert!(out.alerts.len() + out.console.len() <= 1024);
++}
++
++#[test]
++fn combined_messages_obey_the_byte_budget() {
++    let out = go("var s = 'x'.repeat(60_000); for (var i = 0; i < 30; i++) console.println(s);", &Event::doc("Open"));
++    assert!(out.error.is_some());
++    assert!(out.console.iter().map(String::len).sum::<usize>() <= 1024 * 1024);
++}
++
++#[test]
++fn message_coercion_can_reenter_the_host_without_panicking() {
++    let out = go("console.println({toString: function() { app.alert('nested'); return 'outer'; }});", &Event::doc("Open"));
++    assert_eq!(out.error, None);
++    assert_eq!(out.console, ["outer"]);
++    assert_eq!(out.alerts, ["nested"]);
++}
++
+ fn fields() -> Vec<FieldState> {
+     let mut agree = FieldState::new("agree", FieldType::CheckBox, vec![]);
+     agree.options = vec![("Yes".into(), "Yes".into())];
+@@ -949,3 +994,64 @@ $host.gotoURL("https://example.org")"#,
+         assert!(o.abandoned || o.error.is_some(), "{o:?}");
+     }
+ }
++
++#[test]
++fn queued_ui_requests_share_the_host_output_budget() {
++    for code in [
++        "app.beep()",
++        "this.print()",
++        "this.resetForm()",
++        "app.launchURL('')",
++        "this.submitForm('')",
++        "this.pageNum = 0",
++        "getField('price').setFocus()",
++    ] {
++        let out = go(&format!("for (var i = 0; i < 2048; i++) {{ {code}; }}"), &Event::doc("Open"));
++        assert!(out.error.is_some(), "{code}");
++        assert!(out.requests.len() <= 1024, "{code}");
++    }
++    for code in ["app.launchURL('x'.repeat(70_000))", "this.submitForm({cURL:'x'.repeat(70_000)})", "this.resetForm(['x'.repeat(70_000)])"] {
++        let out = go(code, &Event::doc("Open"));
++        assert!(out.error.is_some(), "{code}");
++        assert!(out.requests.is_empty(), "{code}");
++    }
++}
++
++#[test]
++fn empty_reset_names_still_consume_request_storage() {
++    let out = go("this.resetForm(new Array(1 << 20)); this.resetForm(new Array(1 << 20));", &Event::doc("Open"));
++    assert!(out.error.as_deref().is_some_and(|e| e.contains("request storage limit")));
++    assert_eq!(out.requests.len(), 1);
++    assert!(matches!(&out.requests[0], Request::Reset(names) if names.len() == 1 << 20));
++}
++
++#[test]
++fn completion_values_share_the_host_output_budget() {
++    let out = go("'x'.repeat(70_000)", &Event::doc("Open"));
++    assert_eq!(out.error, None);
++    assert_eq!(out.result.as_deref(), Some("[script completion exceeds message limit]"));
++    let out = go("for(var i=0;i<16;i++) console.println('x'.repeat(65536)); 'done'", &Event::doc("Open"));
++    assert!(out.error.is_some());
++    assert!(out.result.is_none());
++    let out = go("console.println('hello'); 42", &Event::doc("Open"));
++    assert_eq!(out.error, None);
++    assert_eq!(out.result.as_deref(), Some("42"));
++}
++
++#[test]
++fn exception_diagnostics_are_bounded_without_running_script() {
++    for script in ["throw 'x'.repeat(70_000)", "throw new Error('x'.repeat(70_000))", "throw new String('x'.repeat(70_000))"] {
++        let out = go(script, &Event::doc("Open"));
++        assert!(out.error.as_ref().is_some_and(|s| s.len() <= 65536));
++    }
++    for script in [
++        "throw {toString(){app.alert('unexpected');return 'oops'}}",
++        "var e=new Error('oops');Object.defineProperty(e,'message',{get(){app.alert('unexpected');return 'oops'}});throw e",
++    ] {
++        let out = go(script, &Event::doc("Open"));
++        assert!(out.error.is_some());
++        assert!(out.alerts.is_empty());
++    }
++    let out = go("throw new TypeError('ordinary failure')", &Event::doc("Open"));
++    assert!(out.error.as_deref().is_some_and(|s| s.contains("TypeError: ordinary failure")));
++}
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index 67af806..11d3f65 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -664,29 +664,45 @@ pub struct Endpoint {
+ /// Listen on `127.0.0.1` (random port) and forward authenticated requests to `client`.
+ ///
+ /// Protocol: newline-delimited JSON-RPC 2.0. The first request on a connection must be
+-/// `{"method": "auth", "params": {"token": …}}`; anything else closes the connection.
++/// {"method": "auth", "params": {"token": …}}; anything else closes the connection.
++/// At most 16 connections are served. Authentication must finish within five seconds and
++/// 4096 bytes; later frames are limited to 4 MiB, with a 60-second read idle timeout.
+ #[cfg(not(target_arch = "wasm32"))]
+ pub fn serve(client: ControlClient) -> std::io::Result<Endpoint> {
+-    use std::io::{BufRead, BufReader, Write};
++    use std::io::{BufReader, Write};
++    use std::sync::{
++        Arc,
++        atomic::{AtomicUsize, Ordering},
++    };
+     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+     let port = listener.local_addr()?.port();
+     let token = random_token()?;
+     let expected = token.clone();
+     std::thread::Builder::new().name("pdfcraft-control".into()).spawn(move || {
++        let open = Arc::new(AtomicUsize::new(0));
+         for stream in listener.incoming().flatten() {
++            if open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < 16).then_some(n + 1)).is_err() {
++                continue;
++            }
++            let permit = ControlPermit(Arc::clone(&open));
+             let client = client.clone();
+             let expected = expected.clone();
+             let _ = std::thread::Builder::new().name("pdfcraft-control-conn".into()).spawn(move || {
++                let _permit = permit;
+                 let Ok(read) = stream.try_clone() else { return };
+                 let mut write = stream;
+                 let mut authed = false;
+-                for line in BufReader::new(read).lines() {
+-                    let Ok(line) = line else { break };
++                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++                let mut reader = BufReader::new(read);
++                if write.set_write_timeout(Some(std::time::Duration::from_secs(5))).is_err() {
++                    return;
++                }
++                while let Ok(Some(line)) = control_line(&mut reader, (!authed).then_some(deadline)) {
+                     if line.trim().is_empty() {
+                         continue;
+                     }
+                     let (reply, close) = match serde_json::from_str::<Value>(&line) {
+-                        Err(e) => (rpc_error(Value::Null, -32700, &format!("parse error: {e}")), false),
++                        Err(e) => (rpc_error(Value::Null, -32700, &format!("parse error: {e}")), !authed),
+                         Ok(msg) => {
+                             let id = msg.get("id").cloned().unwrap_or(Value::Null);
+                             let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+@@ -720,6 +736,46 @@ pub fn serve(client: ControlClient) -> std::io::Result<Endpoint> {
+     Ok(Endpoint { port, token })
+ }
+ 
++/// Releases a connection slot on EOF, errors, unwinding and failed thread creation.
++#[cfg(not(target_arch = "wasm32"))]
++struct ControlPermit(std::sync::Arc<std::sync::atomic::AtomicUsize>);
++#[cfg(not(target_arch = "wasm32"))]
++impl Drop for ControlPermit {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
++    }
++}
++
++#[cfg(not(target_arch = "wasm32"))]
++fn control_line(reader: &mut std::io::BufReader<std::net::TcpStream>, deadline: Option<std::time::Instant>) -> std::io::Result<Option<String>> {
++    use std::io::BufRead;
++    let limit: usize = if deadline.is_some() { 4096 } else { 4 * 1024 * 1024 };
++    let mut line = Vec::new();
++    loop {
++        let timeout = match deadline {
++            Some(d) => d
++                .checked_duration_since(std::time::Instant::now())
++                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "authentication timeout"))?,
++            None => std::time::Duration::from_secs(60),
++        };
++        reader.get_ref().set_read_timeout(Some(timeout))?;
++        let buf = reader.fill_buf()?;
++        if buf.is_empty() {
++            return if line.is_empty() { Ok(None) } else { Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete control frame")) };
++        }
++        let end = buf.iter().position(|b| *b == b'\n');
++        let count = end.map_or(buf.len(), |n| n + 1);
++        if count > limit.saturating_sub(line.len()) {
++            return Err(std::io::Error::other("control frame too large"));
++        }
++        line.extend_from_slice(&buf[..count]);
++        reader.consume(count);
++        if end.is_some() {
++            return String::from_utf8(line).map(Some).map_err(std::io::Error::other);
++        }
++    }
++}
++
+ #[cfg(not(target_arch = "wasm32"))]
+ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
+     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+diff --git a/crates/ui-egui/tests/control.rs b/crates/ui-egui/tests/control.rs
+index e4833f6..38b2a26 100644
+--- a/crates/ui-egui/tests/control.rs
++++ b/crates/ui-egui/tests/control.rs
+@@ -957,6 +957,36 @@ fn loopback_transport_requires_the_token() {
+     assert!(good[2]["error"]["message"].as_str().unwrap().contains("disabled"));
+ }
+ 
++#[test]
++fn loopback_transport_closes_oversized_unauthenticated_lines() {
++    use std::io::{Read, Write};
++    let (_h, client) = harness();
++    let endpoint = pdfcraft_ui_egui::control::serve(client).unwrap();
++    let mut stream = std::net::TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
++    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
++    // No newline: the old reader waits and retains the entire input before authentication.
++    let _ = stream.write_all(&vec![b'x'; 4 * 1024 * 1024 + 1]);
++    let mut byte = [0];
++    match stream.read(&mut byte) {
++        Ok(0) => {}
++        Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {}
++        other => panic!("oversized unauthenticated input was not disconnected: {other:?}"),
++    }
++}
++
++#[test]
++fn loopback_transport_limits_unauthenticated_connections() {
++    use std::io::Read;
++    let (_h, client) = harness();
++    let endpoint = pdfcraft_ui_egui::control::serve(client).unwrap();
++    let held: Vec<_> = (0..16).map(|_| std::net::TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap()).collect();
++    let mut extra = std::net::TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
++    extra.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
++    let mut byte = [0];
++    assert_eq!(extra.read(&mut byte).unwrap(), 0, "excess connection must close before allocating a worker");
++    drop(held);
++}
++
+ #[test]
+ fn control_default_workspace_and_session_override() {
+     let (mut h, c) = harness();
+@@ -1025,3 +1055,41 @@ fn measurement_tools_draw_live_calibrate_save_and_export() {
+     assert!((h.state().views[0].measure.drawing_points - 100.0).abs() < 0.01);
+     let _ = std::fs::remove_dir_all(dir);
+ }
++
++#[test]
++fn loopback_transport_authentication_has_a_total_deadline() {
++    use std::io::{Read, Write};
++    let (_h, client) = harness();
++    let endpoint = pdfcraft_ui_egui::control::serve(client).unwrap();
++    let mut stream = std::net::TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
++    stream.set_read_timeout(Some(std::time::Duration::from_secs(8))).unwrap();
++    // Blank frames cannot restart the pre-authentication clock.
++    stream.write_all(b"\n\n").unwrap();
++    let mut byte = [0];
++    assert_eq!(stream.read(&mut byte).unwrap(), 0);
++}
++
++#[test]
++fn loopback_transport_releases_connection_slots_after_rejection() {
++    use std::io::{BufRead, BufReader, Write};
++    let (_h, client) = harness();
++    let endpoint = pdfcraft_ui_egui::control::serve(client).unwrap();
++    for _ in 0..32 {
++        let mut stream = std::net::TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
++        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
++        writeln!(stream, "{}", json!({"id":0,"method":"auth","params":{"token":"wrong"}})).unwrap();
++        let mut reply = String::new();
++        BufReader::new(stream).read_line(&mut reply).unwrap();
++        let reply: Value = serde_json::from_str(&reply).unwrap();
++        assert_eq!(reply["error"]["code"], -32001);
++    }
++    // A later valid client can still authenticate after twice the maximum number of rejections.
++    let mut stream = std::net::TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
++    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
++    writeln!(stream, "{}", json!({"id":7,"method":"auth","params":{"token":endpoint.token}})).unwrap();
++    let mut reply = String::new();
++    BufReader::new(stream).read_line(&mut reply).unwrap();
++    let reply: Value = serde_json::from_str(&reply).unwrap();
++    assert_eq!(reply["id"], 7);
++    assert_eq!(reply["result"]["ok"], true);
++}

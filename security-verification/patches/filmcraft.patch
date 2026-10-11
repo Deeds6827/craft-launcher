@@ -1,0 +1,433 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 1db0213..9c7c352 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1672,6 +1672,7 @@ dependencies = [
+  "cpal",
+  "eframe",
+  "egui",
++ "filmcraft-automation",
+  "filmcraft-engine",
+  "filmcraft-export",
+  "filmcraft-gpu",
+diff --git a/apps/filmcraft/Cargo.toml b/apps/filmcraft/Cargo.toml
+index 8517548..54d2cd8 100644
+--- a/apps/filmcraft/Cargo.toml
++++ b/apps/filmcraft/Cargo.toml
+@@ -58,3 +58,6 @@ zbus = "5.19"
+ # Icon + VERSIONINFO for filmcraft.exe (build.rs); only needed when building on Windows.
+ [target.'cfg(windows)'.build-dependencies]
+ winresource = "0.1"
++
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++filmcraft-automation = { workspace = true }
+diff --git a/apps/filmcraft/src/control_server.rs b/apps/filmcraft/src/control_server.rs
+index d3b40f3..f6a6ffb 100644
+--- a/apps/filmcraft/src/control_server.rs
++++ b/apps/filmcraft/src/control_server.rs
+@@ -6,6 +6,8 @@
+ //! bounded ([`MAX_LINE`]) and so is the number of open connections ([`MAX_CONNECTIONS`]); junk
+ //! never reaches the UI thread. See `docs/control-protocol.md`.
+ 
++use filmcraft_automation::control_auth;
++
+ use std::io::{BufRead, BufReader, Read, Write};
+ use std::net::{TcpListener, TcpStream};
+ use std::sync::Arc;
+@@ -24,6 +26,13 @@ pub const MAX_CONNECTIONS: usize = 16;
+ 
+ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+     let (tx, rx) = channel::<ControlRequest>();
++    let token = match control_auth::token_from_env() {
++        Ok(token) => token,
++        Err(e) => {
++            eprintln!("control server disabled: {e}");
++            return rx;
++        }
++    };
+     let listener = match TcpListener::bind(("127.0.0.1", port)) {
+         Ok(l) => l,
+         Err(e) => {
+@@ -32,11 +41,11 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+         }
+     };
+     eprintln!("filmcraft: control server listening on 127.0.0.1:{port}");
+-    std::thread::spawn(move || accept_loop(listener, tx, ctx));
++    std::thread::spawn(move || accept_loop(listener, tx, ctx, token));
+     rx
+ }
+ 
+-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context) {
++fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {
+     let open = Arc::new(AtomicUsize::new(0));
+     for mut stream in listener.incoming().flatten() {
+         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+@@ -44,6 +53,7 @@ fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Con
+             let _ = writeln!(stream, "{}", json!({"ok": false, "error": "too many control connections"}));
+             continue;
+         }
++        let token = token.clone();
+         let tx = tx.clone();
+         let ctx = ctx.clone();
+         // The slot is given back when the guard drops: after `serve` returns, if it panics, or if
+@@ -51,7 +61,7 @@ fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Con
+         let slot = Slot(Arc::clone(&open));
+         let spawned = std::thread::Builder::new().name("control-conn".into()).spawn(move || {
+             let _slot = slot;
+-            serve(stream, &tx, &ctx);
++            serve(stream, &tx, &ctx, &token);
+         });
+         if let Err(e) = spawned {
+             eprintln!("filmcraft: control server could not start a connection thread: {e}");
+@@ -68,8 +78,9 @@ impl Drop for Slot {
+     }
+ }
+ 
+-fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
+-    let Ok(read) = stream.try_clone() else { return };
++fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str) {
++    let mut stream = stream;
++    let Ok(read) = control_auth::authenticate_server_with_token(&mut stream, token) else { return };
+     serve_lines(read, stream, |method, params| {
+         let (req, rrx) = ControlRequest::new(method, params);
+         tx.send(req).ok()?;
+@@ -275,7 +286,9 @@ mod tests {
+         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+         let addr = listener.local_addr().unwrap();
+         let (tx, _rx) = channel::<ControlRequest>();
+-        std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default()));
++        std::thread::spawn(move || {
++            accept_loop(listener, tx, egui::Context::default(), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into())
++        });
+         // Idle connections are accepted in order and held open.
+         let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
+         let mut extra = TcpStream::connect(addr).unwrap();
+@@ -286,3 +299,44 @@ mod tests {
+         drop(held);
+     }
+ }
++
++#[cfg(test)]
++mod security_regression {
++    use super::*;
++    #[test]
++    fn unauthenticated_commands_never_reach_the_ui() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (connection, _) = listener.accept().unwrap();
++        let (tx, rx) = channel();
++        let ctx = egui::Context::default();
++        let worker = std::thread::spawn(move || serve(connection, &tx, &ctx, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
++        writeln!(socket, "{}", json!({"id": 1, "method": "engine.execute", "params": {"command": "file.saveAs", "params": {"path": "must-not-write"}}}))
++            .unwrap();
++        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "unauthenticated request reached the UI");
++        drop(socket);
++        worker.join().unwrap();
++    }
++    #[test]
++    fn authenticated_commands_reach_the_ui() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (connection, _) = listener.accept().unwrap();
++        let (tx, rx) = channel();
++        let ctx = egui::Context::default();
++        let worker = std::thread::spawn(move || serve(connection, &tx, &ctx, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
++        control_auth::authenticate_client(&mut socket, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
++        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++        writeln!(socket, "{}", json!({"id": 7, "method": "document.inspect", "params": {}})).unwrap();
++        let request = rx.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(request.method, "document.inspect");
++        request.reply.send(json!({"ok": true, "result": {"safe": true}})).unwrap();
++        let mut reply = String::new();
++        BufReader::new(&socket).read_line(&mut reply).unwrap();
++        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
++        assert_eq!(reply["id"], 7);
++        assert_eq!(reply["result"]["safe"], true);
++        drop(socket);
++        worker.join().unwrap();
++    }
++}
+diff --git a/crates/automation/src/bridge.rs b/crates/automation/src/bridge.rs
+index b7d3e19..e3e3c48 100644
+--- a/crates/automation/src/bridge.rs
++++ b/crates/automation/src/bridge.rs
+@@ -18,6 +18,7 @@ type Conn = (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWr
+ pub struct BridgeClient {
+     addr: String,
+     conn: Mutex<Option<Conn>>,
++    token: Option<String>,
+     next_id: AtomicU64,
+ }
+ 
+@@ -29,7 +30,13 @@ impl BridgeClient {
+         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
+         }
+-        Ok(Self { addr, conn: Mutex::new(None), next_id: AtomicU64::new(1) })
++        Ok(Self { addr, token: None, conn: Mutex::new(None), next_id: AtomicU64::new(1) })
++    }
++
++    pub fn with_token(mut self, token: &str) -> std::io::Result<Self> {
++        self.token = Some(crate::control_auth::validate_token(token)?);
++        self.conn = Mutex::new(None);
++        Ok(self)
+     }
+ 
+     /// Run engine command `id` in the app. A blocking export (`file.exportMedia` with
+@@ -75,6 +82,33 @@ impl BridgeClient {
+                     .await
+                     .map_err(|_| AutomationError::Bridge(format!("timed out connecting to {}", self.addr)))?
+                     .map_err(|e| AutomationError::Bridge(format!("cannot connect to {} ({e}); start the app with `filmcraft --control <port>`", self.addr)))?;
++                if !s.peer_addr().map_err(|e| AutomationError::Bridge(e.to_string()))?.ip().is_loopback() {
++                    return Err(AutomationError::Bridge("control address must be loopback".into()));
++                }
++                let token =
++                    self.token.clone().map(Ok).unwrap_or_else(crate::control_auth::token_from_env).map_err(|e| AutomationError::Bridge(e.to_string()))?;
++                let request = crate::control_auth::auth_request(&token).map_err(|e| AutomationError::Bridge(e.to_string()))?;
++                let mut s = s;
++                tokio::time::timeout(crate::control_auth::AUTH_TIMEOUT, async {
++                    s.write_all(request.as_bytes()).await?;
++                    let mut bytes = Vec::new();
++                    loop {
++                        let mut b = [0u8; 1];
++                        tokio::io::AsyncReadExt::read_exact(&mut s, &mut b).await?;
++                        if b[0] == b'\n' {
++                            break;
++                        }
++                        if bytes.len() == crate::control_auth::MAX_AUTH {
++                            return Err(std::io::Error::other("authentication reply too large"));
++                        }
++                        bytes.push(b[0]);
++                    }
++                    let reply = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
++                    crate::control_auth::check_reply(&reply)
++                })
++                .await
++                .map_err(|_| AutomationError::Bridge("authentication timeout".into()))?
++                .map_err(|e| AutomationError::Bridge(e.to_string()))?;
+                 let (r, w) = s.into_split();
+                 *guard = Some((BufReader::new(r), w));
+             }
+@@ -132,6 +166,12 @@ mod tests {
+             let mut polls = 0;
+             while let Ok(Some(line)) = lines.next_line().await {
+                 let req: Value = serde_json::from_str(&line).unwrap();
++                if req["method"] == "auth" {
++                    assert_eq!(req["params"]["token"], "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
++                    let response = format!("{}\n", json!({"id":0,"ok":true,"result":{"authenticated":true}}));
++                    w.write_all(response.as_bytes()).await.unwrap();
++                    continue;
++                }
+                 log.lock().await.push(req.clone());
+                 let reply = match req["params"]["command"].as_str() {
+                     Some("file.exportMedia") => json!({"job": 7, "path": "/tmp/out.mov"}),
+@@ -155,7 +195,7 @@ mod tests {
+     #[tokio::test]
+     async fn a_blocking_export_is_polled_as_a_job() {
+         let (addr, seen) = fake_app(json!({"frames": 642})).await;
+-        let b = BridgeClient::new(addr).unwrap();
++        let b = BridgeClient::new(addr).unwrap().with_token("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+         let r = b.execute("file.exportMedia", json!({"path": "/tmp/out.mov", "wait": true})).await.unwrap();
+         assert_eq!(r, json!({"job": 7, "path": "/tmp/out.mov", "result": {"frames": 642}}));
+         let seen = seen.lock().await;
+@@ -168,7 +208,7 @@ mod tests {
+     #[tokio::test]
+     async fn a_failed_blocking_export_is_an_error() {
+         let (addr, _) = fake_app(json!({"error": "encode: disk full"})).await;
+-        let b = BridgeClient::new(addr).unwrap();
++        let b = BridgeClient::new(addr).unwrap().with_token("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+         let e = b.execute("file.exportMedia", json!({"path": "/tmp/out.mov", "wait": true})).await.unwrap_err();
+         assert!(e.to_string().contains("export failed: encode: disk full"), "{e}");
+     }
+@@ -177,7 +217,7 @@ mod tests {
+     #[tokio::test]
+     async fn other_commands_are_forwarded() {
+         let (addr, seen) = fake_app(Value::Null).await;
+-        let b = BridgeClient::new(addr).unwrap();
++        let b = BridgeClient::new(addr).unwrap().with_token("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+         b.execute("file.exportMedia", json!({"path": "/tmp/out.mov"})).await.unwrap();
+         b.execute("sequence.inspect", json!({})).await.unwrap();
+         let seen = seen.lock().await;
+diff --git a/crates/automation/src/control_auth.rs b/crates/automation/src/control_auth.rs
+new file mode 100644
+index 0000000..0d5d4b5
+--- /dev/null
++++ b/crates/automation/src/control_auth.rs
+@@ -0,0 +1,153 @@
++//! First-frame authentication for the optional native control transport.
++use serde_json::{Value, json};
++#[cfg(not(target_arch = "wasm32"))]
++use std::io::Read;
++use std::io::{self, Write};
++use std::net::TcpStream;
++use std::time::Duration;
++#[cfg(not(target_arch = "wasm32"))]
++use std::time::Instant;
++
++pub const TOKEN_ENV: &str = "FILMCRAFT_CONTROL_TOKEN";
++pub const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
++pub const MAX_AUTH: usize = 4096;
++
++pub fn validate_token(token: &str) -> io::Result<String> {
++    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "control token must contain 64 hexadecimal characters"));
++    }
++    Ok(token.to_ascii_lowercase())
++}
++
++pub fn token_from_env() -> io::Result<String> {
++    let token = std::env::var(TOKEN_ENV).map_err(|_| {
++        io::Error::new(io::ErrorKind::PermissionDenied, format!("set {TOKEN_ENV} to a private 64-character hexadecimal token for the app and client"))
++    })?;
++    validate_token(&token)
++}
++
++fn denied() -> io::Error {
++    io::Error::new(io::ErrorKind::PermissionDenied, "control authentication failed")
++}
++
++/// Read without over-reading the following frame, with a total deadline (including slow peers).
++#[cfg(not(target_arch = "wasm32"))]
++#[allow(clippy::disallowed_methods)] // The native-only handshake may read the native clock.
++fn auth_line(stream: &mut TcpStream) -> io::Result<Value> {
++    let deadline = Instant::now() + AUTH_TIMEOUT;
++    let mut bytes = Vec::new();
++    loop {
++        let left = deadline.checked_duration_since(Instant::now()).ok_or_else(denied)?;
++        stream.set_read_timeout(Some(left))?;
++        let mut byte = [0u8; 1];
++        stream.read_exact(&mut byte)?;
++        if byte[0] == b'\n' {
++            return serde_json::from_slice(&bytes).map_err(|_| denied());
++        }
++        if bytes.len() == MAX_AUTH {
++            return Err(denied());
++        }
++        bytes.push(byte[0]);
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++fn auth_line(_stream: &mut TcpStream) -> io::Result<Value> {
++    Err(denied())
++}
++
++pub fn auth_request(token: &str) -> io::Result<String> {
++    let token = validate_token(token)?;
++    Ok(format!("{}\n", json!({"id": 0, "method": "auth", "params": {"token": token}})))
++}
++
++pub fn check_reply(reply: &Value) -> io::Result<()> {
++    if reply.get("id") == Some(&json!(0)) && reply.get("ok") == Some(&json!(true)) && reply["result"]["authenticated"] == true { Ok(()) } else { Err(denied()) }
++}
++
++pub fn authenticate_client(stream: &mut TcpStream, token: &str) -> io::Result<()> {
++    if !stream.peer_addr()?.ip().is_loopback() {
++        return Err(denied());
++    }
++    let read_timeout = stream.read_timeout()?;
++    let write_timeout = stream.write_timeout()?;
++    stream.set_write_timeout(Some(AUTH_TIMEOUT))?;
++    let result = (|| {
++        stream.write_all(auth_request(token)?.as_bytes())?;
++        check_reply(&auth_line(stream)?)
++    })();
++    stream.set_read_timeout(read_timeout)?;
++    stream.set_write_timeout(write_timeout)?;
++    result.map_err(|_| denied())
++}
++
++pub fn authenticate_server_with_token(stream: &mut TcpStream, expected: &str) -> io::Result<TcpStream> {
++    if !stream.peer_addr()?.ip().is_loopback() {
++        return Err(denied());
++    }
++    let expected = validate_token(expected)?;
++    stream.set_write_timeout(Some(AUTH_TIMEOUT))?;
++    let req = auth_line(stream)?;
++    let supplied = req["params"]["token"].as_str().and_then(|t| validate_token(t).ok());
++    let ok = req["method"] == "auth" && supplied.as_ref().is_some_and(|t| t.bytes().zip(expected.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0);
++    if !ok {
++        return Err(denied());
++    }
++    writeln!(stream, "{}", json!({"id": req.get("id").cloned().unwrap_or(Value::Null), "ok": true, "result": {"authenticated": true}}))?;
++    stream.set_read_timeout(None)?;
++    stream.set_write_timeout(None)?;
++    stream.try_clone()
++}
++
++#[cfg(test)]
++mod tests {
++    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
++    use super::*;
++    use std::io::{BufRead, BufReader};
++    use std::net::TcpListener;
++    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++    #[test]
++    fn tokens_are_strict_and_errors_never_echo_them() {
++        for bad in ["", "abc", &"z".repeat(64), &"1".repeat(65)] {
++            assert!(validate_token(bad).is_err());
++        }
++        assert_eq!(validate_token(&TOKEN.to_uppercase()).unwrap(), TOKEN);
++    }
++    #[test]
++    fn authentication_preserves_the_next_frame() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (mut server, _) = listener.accept().unwrap();
++        let worker = std::thread::spawn(move || {
++            let read = authenticate_server_with_token(&mut server, TOKEN).unwrap();
++            let mut next = String::new();
++            BufReader::new(read).read_line(&mut next).unwrap();
++            assert_eq!(next, "next-command\n");
++        });
++        authenticate_client(&mut client, TOKEN).unwrap();
++        client.write_all(b"next-command\n").unwrap();
++        worker.join().unwrap();
++    }
++    #[test]
++    fn a_failed_handshake_is_an_authentication_error() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (mut server, _) = listener.accept().unwrap();
++        let worker = std::thread::spawn(move || {
++            assert!(authenticate_server_with_token(&mut server, &"f".repeat(64)).is_err());
++        });
++        assert_eq!(authenticate_client(&mut client, TOKEN).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
++        worker.join().unwrap();
++    }
++    #[test]
++    fn wrong_tokens_http_and_oversized_frames_are_rejected() {
++        for frame in [auth_request(&"f".repeat(64)).unwrap(), "POST / HTTP/1.1\n".into(), "x".repeat(MAX_AUTH + 1)] {
++            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++            let (mut server, _) = listener.accept().unwrap();
++            let worker = std::thread::spawn(move || authenticate_server_with_token(&mut server, TOKEN).is_err());
++            let _ = client.write_all(frame.as_bytes());
++            assert!(worker.join().unwrap());
++        }
++    }
++}
+diff --git a/crates/automation/src/lib.rs b/crates/automation/src/lib.rs
+index 361b1a5..dd5fd88 100644
+--- a/crates/automation/src/lib.rs
++++ b/crates/automation/src/lib.rs
+@@ -10,6 +10,8 @@
+ 
+ #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
+ 
++pub mod control_auth;
++
+ pub mod bridge;
+ pub mod long_job;
+ pub mod server;
+diff --git a/docs/control-authentication.md b/docs/control-authentication.md
+new file mode 100644
+index 0000000..12c707e
+--- /dev/null
++++ b/docs/control-authentication.md
+@@ -0,0 +1,5 @@
++# Native control authentication
++
++The optional loopback control server requires `FILMCRAFT_CONTROL_TOKEN` in both the desktop app and its CLI/MCP client. Use a private, randomly generated 32-byte token, encoded as exactly 64 hexadecimal characters. Keep it out of command lines, logs, source control and shared configuration. Missing or invalid credentials disable the listener. Headless operation does not require a token.
++
++External clients must send `{"id":0,"method":"auth","params":{"token":"<private token>"}}` as the first JSON line on every connection and reconnect, then read the successful `ok` response before sending commands. Authentication frames are limited to 4096 bytes and must complete within five seconds. The native clients perform this handshake automatically and reject non-loopback peers. Existing clients need this handshake before using a patched app.

@@ -1,0 +1,209 @@
+diff --git a/apps/wordcraft/src/control_server.rs b/apps/wordcraft/src/control_server.rs
+index 54828d5..a130b4e 100644
+--- a/apps/wordcraft/src/control_server.rs
++++ b/apps/wordcraft/src/control_server.rs
+@@ -424,8 +424,10 @@ mod tests {
+             }
+             assert!(line.contains("bad JSON"), "{line}");
+         }
++        // Measure the server close, excluding the writer drain on Windows.
++        let elapsed = t0.elapsed();
+         let _ = feeder.join();
+-        assert!(t0.elapsed() < Duration::from_millis(1500), "{:?}", t0.elapsed());
++        assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+     }
+ 
+     #[test]
+diff --git a/crates/docx/src/package.rs b/crates/docx/src/package.rs
+index c3e3ebc..0cb7935 100644
+--- a/crates/docx/src/package.rs
++++ b/crates/docx/src/package.rs
+@@ -158,17 +158,19 @@ impl Package {
+                 return Err(DocxError::Limit(format!("part {name} declares {} bytes", f.size())));
+             }
+             let room = max_part.min(max_total.saturating_sub(total));
+-            let mut buf = Vec::with_capacity(f.size().min(16 * 1024 * 1024) as usize);
+-            let read = (&mut f).take(room + 1).read_to_end(&mut buf);
++            let mut buf = Vec::with_capacity(f.size().min(room).min(16 * 1024 * 1024) as usize);
++            let read = (&mut f).take(room.saturating_add(1)).read_to_end(&mut buf);
++            // Failed integrity/decompression checks can still have produced bytes. Charge
++            // that work before skipping a corrupt optional part.
++            if buf.len() as u64 > room {
++                return Err(DocxError::Limit(format!("part {name} decompresses past the size limit")));
++            }
++            total = total.saturating_add(buf.len() as u64);
+             if let Err(e) = read {
+                 // A corrupt entry: keep going unless it's a part we can't do without.
+                 log::warn!("docx: zip entry {name} unreadable: {e}");
+                 continue;
+             }
+-            if buf.len() as u64 > room {
+-                return Err(DocxError::Limit(format!("part {name} decompresses past the size limit")));
+-            }
+-            total = total.saturating_add(buf.len() as u64);
+             files.insert(name, buf);
+         }
+         Ok(Package { files })
+@@ -346,6 +348,32 @@ mod tests {
+         assert!(Package::open_limited(&z, 10_000_000, 10_000_000).is_ok());
+     }
+ 
++    fn corrupt_crcs(z: &mut [u8], count: usize) {
++        let offsets: Vec<usize> =
++            z.windows(4).enumerate().filter_map(|(i, w)| (w == [0x50, 0x4b, 0x01, 0x02]).then_some(i + 16)).take(count).collect();
++        assert_eq!(offsets.len(), count);
++        for offset in offsets {
++            z[offset] ^= 0xff;
++        }
++    }
++
++    #[test]
++    fn corrupt_members_consume_the_decompression_budget() {
++        let mut z = zip_of(&[("bad-a.xml", vec![b'a'; 64]), ("bad-b.xml", vec![b'b'; 64])]);
++        corrupt_crcs(&mut z, 2);
++        assert!(matches!(Package::open_limited(&z, 128, 96), Err(DocxError::Limit(_))));
++    }
++
++    #[test]
++    fn corrupt_optional_members_remain_lenient_within_budget() {
++        let mut z = zip_of(&[("bad.xml", vec![b'a'; 64]), ("good.xml", b"<good/>".to_vec())]);
++        corrupt_crcs(&mut z, 1);
++        let package = Package::open_limited(&z, 128, 128).unwrap();
++        assert!(package.get("bad.xml").is_none());
++        assert_eq!(package.get("good.xml"), Some(b"<good/>".as_slice()));
++        assert!(matches!(Package::open_limited(&z, 128, 68), Err(DocxError::Limit(_))));
++    }
++
+     #[test]
+     fn lying_declared_size_is_rejected_or_bounded() {
+         let mut z = zip_of(&[("a.xml", b"<a/>".to_vec())]);
+diff --git a/crates/formats/src/odt.rs b/crates/formats/src/odt.rs
+index 1cbc047..3487918 100644
+--- a/crates/formats/src/odt.rs
++++ b/crates/formats/src/odt.rs
+@@ -1274,13 +1274,34 @@ impl Body<'_> {
+ }
+ 
+ fn read_entry(z: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<Vec<u8>> {
++    read_entry_budgeted(z, name, &mut EntryBudget { remaining: MAX_ENTRY, exceeded: false })
++}
++
++struct EntryBudget {
++    remaining: u64,
++    exceeded: bool,
++}
++
++fn read_entry_budgeted(z: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str, budget: &mut EntryBudget) -> Option<Vec<u8>> {
++    if budget.exceeded {
++        return None;
++    }
+     let f = z.by_name(name).ok()?;
+-    if f.size() > MAX_ENTRY {
++    if f.size() > budget.remaining {
++        budget.exceeded = true;
+         return None;
+     }
+     let mut out = Vec::new();
+-    f.take(MAX_ENTRY).read_to_end(&mut out).ok()?;
+-    Some(out)
++    let read = f.take(budget.remaining.saturating_add(1)).read_to_end(&mut out);
++    let consumed = out.len() as u64;
++    if consumed > budget.remaining {
++        budget.exceeded = true;
++        budget.remaining = 0;
++        return None;
++    }
++    // Corrupt entries consume work even when their bytes cannot be used as images.
++    budget.remaining = budget.remaining.saturating_sub(consumed);
++    read.ok().map(|_| out)
+ }
+ 
+ fn read_meta(xml: &[u8]) -> Meta {
+@@ -1325,12 +1346,8 @@ pub fn parse(bytes: &[u8]) -> Result<Flow, String> {
+     }
+     styles.read(&content, true);
+     let meta = read_entry(&mut z, "meta.xml").map(|m| read_meta(&m)).unwrap_or_default();
+-    let mut total = 0u64;
+-    let mut fetch = |path: &str| -> Option<Vec<u8>> {
+-        let d = read_entry(&mut z, path)?;
+-        total += d.len() as u64;
+-        (total <= MAX_ENTRY).then_some(d)
+-    };
++    let mut budget = EntryBudget { remaining: MAX_ENTRY, exceeded: false };
++    let mut fetch = |path: &str| -> Option<Vec<u8>> { read_entry_budgeted(&mut z, path, &mut budget) };
+     let mut body = Body {
+         styles: &styles,
+         zip: &mut fetch,
+@@ -1380,6 +1397,9 @@ pub fn parse(bytes: &[u8]) -> Result<Flow, String> {
+     if blocks.is_empty() {
+         blocks.push(FBlock::Para(Para::default()));
+     }
++    if budget.exceeded {
++        return Err("ODT: image decompression budget exceeded".into());
++    }
+     Ok(Flow { blocks, meta })
+ }
+ 
+@@ -1392,6 +1412,48 @@ pub fn import(bytes: &[u8]) -> Result<Document, String> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn failed_entries_consume_budget_and_missing_entries_do_not() {
++        use zip::write::SimpleFileOptions;
++        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
++        writer.start_file("bad", SimpleFileOptions::default()).unwrap();
++        writer.write_all(b"12345678").unwrap();
++        writer.start_file("good", SimpleFileOptions::default()).unwrap();
++        writer.write_all(b"abcd").unwrap();
++        let mut bytes = writer.finish().unwrap().into_inner();
++        let central = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
++        bytes[central + 16] ^= 0xff;
++        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
++        let mut budget = EntryBudget { remaining: 10, exceeded: false };
++        assert!(read_entry_budgeted(&mut archive, "missing", &mut budget).is_none());
++        assert_eq!(budget.remaining, 10);
++        assert!(read_entry_budgeted(&mut archive, "bad", &mut budget).is_none());
++        assert_eq!(budget.remaining, 2);
++        assert!(!budget.exceeded);
++        assert!(read_entry_budgeted(&mut archive, "good", &mut budget).is_none());
++        assert!(budget.exceeded);
++        assert!(read_entry_budgeted(&mut archive, "bad", &mut budget).is_none());
++    }
++
++    #[test]
++    fn repeated_image_references_fail_the_document_budget() {
++        use std::io::Write;
++        let image = "<draw:frame><draw:image xlink:href=\"Pictures/data\"/></draw:frame>";
++        let xml = format!(
++            "<office:document-content><office:body><office:text><text:p>{}</text:p></office:text></office:body></office:document-content>",
++            image.repeat(257)
++        );
++        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
++        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
++        writer.start_file("content.xml", opts).unwrap();
++        writer.write_all(xml.as_bytes()).unwrap();
++        writer.start_file("Pictures/data", opts).unwrap();
++        writer.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
++        let bytes = writer.finish().unwrap().into_inner();
++        assert!(bytes.len() < 16 * 1024);
++        assert!(parse(&bytes).is_err(), "excessive cumulative inflation must fail, even for invalid images");
++    }
++
+     #[test]
+     fn lengths() {
+         assert_eq!(length("1in"), Some(72.0));
+diff --git a/crates/ui-egui/src/paste_picture.rs b/crates/ui-egui/src/paste_picture.rs
+index 2938605..721310e 100644
+--- a/crates/ui-egui/src/paste_picture.rs
++++ b/crates/ui-egui/src/paste_picture.rs
+@@ -141,7 +141,8 @@ mod tests {
+         a.run("edit.undo", json!({})).unwrap();
+         assert_eq!(pictures(&mut a), 0);
+         // Pasted text that names picture files only becomes pictures when files were copied.
+-        assert!(names_picture_files("file:///home/me/shot%201.png\n/tmp/b.JPG\n"));
++        let copied_path = std::env::temp_dir().join("b.JPG");
++        assert!(names_picture_files(&format!("file:///home/me/shot%201.png\n{}\n", copied_path.display())));
+         assert!(!names_picture_files("see /tmp/b.png") && !names_picture_files("notes.txt") && !names_picture_files(""));
+     }
+ 

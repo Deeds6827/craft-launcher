@@ -1,0 +1,193 @@
+[
+  {
+    "repository": "cadcraft",
+    "upstream": "https://github.com/storytold/cadcraft",
+    "baseCommit": "315751e3ec98e708bcc831dd7f80ca0433a2e3d0",
+    "fixedCommit": "2b5d7a86a9e02328ce39e5c79b783517a9b09f91",
+    "patch": "cadcraft.patch",
+    "sha256": "c00a97452235466bee51265198863bd39ebccffa8be5b1882d23ed7be0e72d28",
+    "files": [
+      "Cargo.lock",
+      "apps/cadcraft-cli/tests/mcp_connect.rs",
+      "apps/cadcraft/Cargo.toml",
+      "apps/cadcraft/src/control_server.rs",
+      "crates/mcp/src/backend.rs",
+      "crates/mcp/src/control_auth.rs",
+      "crates/mcp/src/lib.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "gridcraft",
+    "upstream": "https://github.com/storytold/gridcraft",
+    "baseCommit": "9f896c1249f40d18bf182199dc03042959be5f3f",
+    "fixedCommit": null,
+    "patch": "gridcraft.patch",
+    "sha256": "70687f2701486e94c8899041496c1710ee3d3951ef74d1817f35476a62d9c03e",
+    "files": [
+      "Cargo.lock",
+      "apps/gridcraft/Cargo.toml",
+      "apps/gridcraft/src/control_server.rs",
+      "crates/mcp/src/backend.rs",
+      "crates/mcp/src/control_auth.rs",
+      "crates/mcp/src/lib.rs",
+      "crates/mcp/src/tests.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "soundcraft",
+    "upstream": "https://github.com/storytold/soundcraft",
+    "baseCommit": "4410486fc21561a9db0dc33961a2017469127e0d",
+    "fixedCommit": null,
+    "patch": "soundcraft.patch",
+    "sha256": "96bf40403729f351be92f60fddbf73edc31b85e8cba35983773ded16942c56ed",
+    "files": [
+      "Cargo.lock",
+      "apps/soundcraft/Cargo.toml",
+      "apps/soundcraft/src/control_server.rs",
+      "crates/automation/src/control_auth.rs",
+      "crates/automation/src/lib.rs",
+      "crates/vst3-host/src/lib.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "deckcraft",
+    "upstream": "https://github.com/storytold/deckcraft",
+    "baseCommit": "a98df49b21632d69a3da994d35df1ea91dab41af",
+    "fixedCommit": null,
+    "patch": "deckcraft.patch",
+    "sha256": "095ba5fb35e37d685df40f60acb364e8cea8049f97b9bcedb73aafbedca3c319",
+    "files": [
+      "Cargo.lock",
+      "apps/deckcraft/Cargo.toml",
+      "apps/deckcraft/src/control_server.rs",
+      "crates/mcp/src/backend.rs",
+      "crates/mcp/src/control_auth.rs",
+      "crates/mcp/src/lib.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "vectorcraft",
+    "upstream": "https://github.com/storytold/vectorcraft",
+    "baseCommit": "10f1c56a861869936af0027cef14b1cf5d8cf515",
+    "fixedCommit": null,
+    "patch": "vectorcraft.patch",
+    "sha256": "a9fd3bc9b36ddbd230dd7e62e3354befdbd6807686738576c9b80db238069a73",
+    "files": [
+      "Cargo.lock",
+      "apps/vectorcraft-cli/src/main.rs",
+      "apps/vectorcraft/Cargo.toml",
+      "apps/vectorcraft/src/control_server.rs",
+      "crates/mcp/src/backend.rs",
+      "crates/mcp/src/control_auth.rs",
+      "crates/mcp/src/lib.rs",
+      "crates/mcp/src/tests.rs",
+      "crates/mcp/src/tests_fileio.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "designcraft",
+    "upstream": "https://github.com/storytold/designcraft",
+    "baseCommit": "a9124a0517594ce9872f73637e7b841a4967bcf9",
+    "fixedCommit": null,
+    "patch": "designcraft.patch",
+    "sha256": "dfe1795f1012bb1db3d5ca8fb8733fa830dec80991f242b08f5cbfd7bc1ec768",
+    "files": [
+      "Cargo.lock",
+      "apps/designcraft/Cargo.toml",
+      "apps/designcraft/src/control_server.rs",
+      "crates/mcp/src/backend.rs",
+      "crates/mcp/src/control_auth.rs",
+      "crates/mcp/src/lib.rs",
+      "crates/mcp/src/tests.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "effectcraft",
+    "upstream": "https://github.com/storytold/effectcraft",
+    "baseCommit": "f953cd2855bf36beffa6a4d608e9bf4b226e9442",
+    "fixedCommit": null,
+    "patch": "effectcraft.patch",
+    "sha256": "ef08083b7cdc562a4cb97a30252476d5e4aa316b3136d504dc2c1b92ab551246",
+    "files": [
+      "Cargo.lock",
+      "apps/effectcraft/Cargo.toml",
+      "apps/effectcraft/src/control_server.rs",
+      "crates/automation/src/backend.rs",
+      "crates/automation/src/bridge.rs",
+      "crates/automation/src/control_auth.rs",
+      "crates/automation/src/lib.rs",
+      "crates/automation/src/tests.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "filmcraft",
+    "upstream": "https://github.com/storytold/filmcraft",
+    "baseCommit": "2ff3f5e266838700c292a35aaf762e3d4dcef980",
+    "fixedCommit": null,
+    "patch": "filmcraft.patch",
+    "sha256": "2ff55f7699f63fda0817276e2249f6f8ff4c95b3b9dce58ea845ab9936d7ea5b",
+    "files": [
+      "Cargo.lock",
+      "apps/filmcraft/Cargo.toml",
+      "apps/filmcraft/src/control_server.rs",
+      "crates/automation/src/bridge.rs",
+      "crates/automation/src/control_auth.rs",
+      "crates/automation/src/lib.rs",
+      "docs/control-authentication.md"
+    ]
+  },
+  {
+    "repository": "lightcraft",
+    "upstream": "https://github.com/storytold/lightcraft",
+    "baseCommit": "9e6c4c6fc9c7a7f192ce846c00ceb531e0f64dda",
+    "fixedCommit": null,
+    "patch": "lightcraft.patch",
+    "sha256": "af5274eb7029de417e1744d3253f8ec25fa06181f631b5cbb580d6c1d72a4382",
+    "files": [
+      "Cargo.lock",
+      "apps/lightcraft/Cargo.toml",
+      "apps/lightcraft/src/control_server.rs",
+      "crates/mcp/src/backend.rs",
+      "crates/mcp/src/control_auth.rs",
+      "crates/mcp/src/lib.rs",
+      "crates/mcp/tests/e2e.rs",
+      "docs/control-authentication.md",
+      "docs/showcase/run.py"
+    ]
+  },
+  {
+    "repository": "wordcraft",
+    "upstream": "https://github.com/storytold/wordcraft",
+    "baseCommit": "e4b7d155f15a7784197ba34eeea0b54490d70eb2",
+    "fixedCommit": "e1259d9ea781d2f63d556585cdcd8379ca66ba6d",
+    "patch": "wordcraft.patch",
+    "sha256": "463f2fb950cdcc56bb5c58a84ba2309a6257487716b92bbe8986e4fdf9d63a45",
+    "files": [
+      "apps/wordcraft/src/control_server.rs",
+      "crates/docx/src/package.rs",
+      "crates/formats/src/odt.rs",
+      "crates/ui-egui/src/paste_picture.rs"
+    ]
+  },
+  {
+    "repository": "pdfcraft",
+    "upstream": "https://github.com/storytold/pdfcraft",
+    "baseCommit": "53a5880386789fc3531e54f6e6ffdef9a8e41f1a",
+    "fixedCommit": null,
+    "patch": "pdfcraft.patch",
+    "sha256": "7596d4e5e99a479ac840f83ca58b441367118b5ba6750b9494b17a0d9264cc2f",
+    "files": [
+      "crates/js/src/lib.rs",
+      "crates/js/src/tests.rs",
+      "crates/ui-egui/src/control.rs",
+      "crates/ui-egui/tests/control.rs"
+    ]
+  }
+]

@@ -1,0 +1,366 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index b1cf3aa..36a9f54 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3411,6 +3411,7 @@ dependencies = [
+  "muda",
+  "rfd",
+  "serde_json",
++ "soundcraft-automation",
+  "soundcraft-engine",
+  "soundcraft-playback",
+  "soundcraft-ui-egui",
+diff --git a/apps/soundcraft/Cargo.toml b/apps/soundcraft/Cargo.toml
+index cb9dab1..fd90bdf 100644
+--- a/apps/soundcraft/Cargo.toml
++++ b/apps/soundcraft/Cargo.toml
+@@ -20,6 +20,7 @@ serde_json.workspace = true
+ log.workspace = true
+ 
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++soundcraft-automation = { workspace = true }
+ rfd.workspace = true
+ 
+ [build-dependencies]
+diff --git a/apps/soundcraft/src/control_server.rs b/apps/soundcraft/src/control_server.rs
+index 51758b9..5b45589 100644
+--- a/apps/soundcraft/src/control_server.rs
++++ b/apps/soundcraft/src/control_server.rs
+@@ -2,7 +2,9 @@
+ //! This is the transport the MCP server (`soundcraft-cli mcp --connect PORT`) wraps.
+ 
+ use serde_json::{Value, json};
++use soundcraft_automation::control_auth;
+ use soundcraft_ui_egui::ControlRequest;
++
+ use std::io::{BufRead, BufReader, Write};
+ use std::net::{TcpListener, TcpStream};
+ use std::sync::mpsc::{Receiver, Sender, channel};
+@@ -10,6 +12,13 @@ use std::time::Duration;
+ 
+ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+     let (tx, rx) = channel::<ControlRequest>();
++    let token = match control_auth::token_from_env() {
++        Ok(token) => token,
++        Err(e) => {
++            eprintln!("control server disabled: {e}");
++            return rx;
++        }
++    };
+     let listener = match TcpListener::bind(("127.0.0.1", port)) {
+         Ok(l) => l,
+         Err(e) => {
+@@ -22,9 +31,10 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+     println!("SOUNDCRAFT_CONTROL_PORT={actual}");
+     let spawned = std::thread::Builder::new().name("soundcraft-control".into()).spawn(move || {
+         for stream in listener.incoming().flatten() {
++            let token = token.clone();
+             let tx = tx.clone();
+             let ctx = ctx.clone();
+-            let _ = std::thread::Builder::new().name("soundcraft-control-conn".into()).spawn(move || serve(stream, tx, ctx));
++            let _ = std::thread::Builder::new().name("soundcraft-control-conn".into()).spawn(move || serve(stream, tx, ctx, &token));
+         }
+     });
+     if let Err(e) = spawned {
+@@ -33,8 +43,9 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+     rx
+ }
+ 
+-fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context) {
+-    let Ok(read) = stream.try_clone() else { return };
++fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context, token: &str) {
++    let mut stream = stream;
++    let Ok(read) = control_auth::authenticate_server_with_token(&mut stream, token) else { return };
+     let mut out = stream;
+     for line in BufReader::new(read).lines() {
+         let Ok(line) = line else { break };
+@@ -64,3 +75,48 @@ fn serve(stream: TcpStream, tx: Sender<ControlRequest>, ctx: egui::Context) {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod security_regression {
++    use super::*;
++    #[test]
++    fn unauthenticated_commands_never_reach_the_ui() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (connection, _) = listener.accept().unwrap();
++        let (tx, rx) = channel();
++        let ctx = egui::Context::default();
++        let worker = std::thread::spawn(move || serve(connection, tx, ctx, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
++        writeln!(
++            socket,
++            "{}",
++            json!({"id": 1, "method": "engine.execute", "params": {"command": "file.saveAs", "params": {"path": "must-not-write"}}})
++        )
++        .unwrap();
++        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "unauthenticated request reached the UI");
++        drop(socket);
++        worker.join().unwrap();
++    }
++    #[test]
++    fn authenticated_commands_reach_the_ui() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (connection, _) = listener.accept().unwrap();
++        let (tx, rx) = channel();
++        let ctx = egui::Context::default();
++        let worker = std::thread::spawn(move || serve(connection, tx, ctx, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
++        control_auth::authenticate_client(&mut socket, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
++        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++        writeln!(socket, "{}", json!({"id": 7, "method": "document.inspect", "params": {}})).unwrap();
++        let request = rx.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(request.method, "document.inspect");
++        request.reply.send(json!({"ok": true, "result": {"safe": true}})).unwrap();
++        let mut reply = String::new();
++        BufReader::new(&socket).read_line(&mut reply).unwrap();
++        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
++        assert_eq!(reply["id"], 7);
++        assert_eq!(reply["result"]["safe"], true);
++        drop(socket);
++        worker.join().unwrap();
++    }
++}
+diff --git a/crates/automation/src/control_auth.rs b/crates/automation/src/control_auth.rs
+new file mode 100644
+index 0000000..31fef8e
+--- /dev/null
++++ b/crates/automation/src/control_auth.rs
+@@ -0,0 +1,157 @@
++//! First-frame authentication for the optional native control transport.
++use serde_json::{Value, json};
++#[cfg(not(target_arch = "wasm32"))]
++use std::io::Read;
++use std::io::{self, Write};
++use std::net::TcpStream;
++use std::time::Duration;
++#[cfg(not(target_arch = "wasm32"))]
++use std::time::Instant;
++
++pub const TOKEN_ENV: &str = "SOUNDCRAFT_CONTROL_TOKEN";
++pub const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
++pub const MAX_AUTH: usize = 4096;
++
++pub fn validate_token(token: &str) -> io::Result<String> {
++    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "control token must contain 64 hexadecimal characters"));
++    }
++    Ok(token.to_ascii_lowercase())
++}
++
++pub fn token_from_env() -> io::Result<String> {
++    let token = std::env::var(TOKEN_ENV).map_err(|_| {
++        io::Error::new(io::ErrorKind::PermissionDenied, format!("set {TOKEN_ENV} to a private 64-character hexadecimal token for the app and client"))
++    })?;
++    validate_token(&token)
++}
++
++fn denied() -> io::Error {
++    io::Error::new(io::ErrorKind::PermissionDenied, "control authentication failed")
++}
++
++/// Read without over-reading the following frame, with a total deadline (including slow peers).
++#[cfg(not(target_arch = "wasm32"))]
++#[allow(clippy::disallowed_methods)] // The native-only handshake may read the native clock.
++fn auth_line(stream: &mut TcpStream) -> io::Result<Value> {
++    let deadline = Instant::now() + AUTH_TIMEOUT;
++    let mut bytes = Vec::new();
++    loop {
++        let left = deadline.checked_duration_since(Instant::now()).ok_or_else(denied)?;
++        stream.set_read_timeout(Some(left))?;
++        let mut byte = [0u8; 1];
++        stream.read_exact(&mut byte)?;
++        if byte[0] == b'\n' {
++            return serde_json::from_slice(&bytes).map_err(|_| denied());
++        }
++        if bytes.len() == MAX_AUTH {
++            return Err(denied());
++        }
++        bytes.push(byte[0]);
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++fn auth_line(_stream: &mut TcpStream) -> io::Result<Value> {
++    Err(denied())
++}
++
++pub fn auth_request(token: &str) -> io::Result<String> {
++    let token = validate_token(token)?;
++    Ok(format!("{}\n", json!({"id": 0, "method": "auth", "params": {"token": token}})))
++}
++
++pub fn check_reply(reply: &Value) -> io::Result<()> {
++    if reply.get("id") == Some(&json!(0)) && reply.get("ok") == Some(&json!(true)) && reply["result"]["authenticated"] == true {
++        Ok(())
++    } else {
++        Err(denied())
++    }
++}
++
++pub fn authenticate_client(stream: &mut TcpStream, token: &str) -> io::Result<()> {
++    if !stream.peer_addr()?.ip().is_loopback() {
++        return Err(denied());
++    }
++    let read_timeout = stream.read_timeout()?;
++    let write_timeout = stream.write_timeout()?;
++    stream.set_write_timeout(Some(AUTH_TIMEOUT))?;
++    let result = (|| {
++        stream.write_all(auth_request(token)?.as_bytes())?;
++        check_reply(&auth_line(stream)?)
++    })();
++    stream.set_read_timeout(read_timeout)?;
++    stream.set_write_timeout(write_timeout)?;
++    result.map_err(|_| denied())
++}
++
++pub fn authenticate_server_with_token(stream: &mut TcpStream, expected: &str) -> io::Result<TcpStream> {
++    if !stream.peer_addr()?.ip().is_loopback() {
++        return Err(denied());
++    }
++    let expected = validate_token(expected)?;
++    stream.set_write_timeout(Some(AUTH_TIMEOUT))?;
++    let req = auth_line(stream)?;
++    let supplied = req["params"]["token"].as_str().and_then(|t| validate_token(t).ok());
++    let ok = req["method"] == "auth" && supplied.as_ref().is_some_and(|t| t.bytes().zip(expected.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0);
++    if !ok {
++        return Err(denied());
++    }
++    writeln!(stream, "{}", json!({"id": req.get("id").cloned().unwrap_or(Value::Null), "ok": true, "result": {"authenticated": true}}))?;
++    stream.set_read_timeout(None)?;
++    stream.set_write_timeout(None)?;
++    stream.try_clone()
++}
++
++#[cfg(test)]
++mod tests {
++    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
++    use super::*;
++    use std::io::{BufRead, BufReader};
++    use std::net::TcpListener;
++    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++    #[test]
++    fn tokens_are_strict_and_errors_never_echo_them() {
++        for bad in ["", "abc", &"z".repeat(64), &"1".repeat(65)] {
++            assert!(validate_token(bad).is_err());
++        }
++        assert_eq!(validate_token(&TOKEN.to_uppercase()).unwrap(), TOKEN);
++    }
++    #[test]
++    fn authentication_preserves_the_next_frame() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (mut server, _) = listener.accept().unwrap();
++        let worker = std::thread::spawn(move || {
++            let read = authenticate_server_with_token(&mut server, TOKEN).unwrap();
++            let mut next = String::new();
++            BufReader::new(read).read_line(&mut next).unwrap();
++            assert_eq!(next, "next-command\n");
++        });
++        authenticate_client(&mut client, TOKEN).unwrap();
++        client.write_all(b"next-command\n").unwrap();
++        worker.join().unwrap();
++    }
++    #[test]
++    fn a_failed_handshake_is_an_authentication_error() {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++        let (mut server, _) = listener.accept().unwrap();
++        let worker = std::thread::spawn(move || {
++            assert!(authenticate_server_with_token(&mut server, &"f".repeat(64)).is_err());
++        });
++        assert_eq!(authenticate_client(&mut client, TOKEN).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
++        worker.join().unwrap();
++    }
++    #[test]
++    fn wrong_tokens_http_and_oversized_frames_are_rejected() {
++        for frame in [auth_request(&"f".repeat(64)).unwrap(), "POST / HTTP/1.1\n".into(), "x".repeat(MAX_AUTH + 1)] {
++            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++            let (mut server, _) = listener.accept().unwrap();
++            let worker = std::thread::spawn(move || authenticate_server_with_token(&mut server, TOKEN).is_err());
++            let _ = client.write_all(frame.as_bytes());
++            assert!(worker.join().unwrap());
++        }
++    }
++}
+diff --git a/crates/automation/src/lib.rs b/crates/automation/src/lib.rs
+index 84d4e23..2edc0c9 100644
+--- a/crates/automation/src/lib.rs
++++ b/crates/automation/src/lib.rs
+@@ -7,6 +7,8 @@
+ //!   exposing SoundCraft as tools and resources.
+ #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+ 
++pub mod control_auth;
++
+ pub mod mcp;
+ 
+ use serde_json::{Value, json};
+@@ -69,22 +71,30 @@ pub struct Remote {
+     addr: String,
+     conn: Option<(TcpStream, BufReader<TcpStream>)>,
+     next_id: u64,
++    token: Option<String>,
+ }
+ 
+ impl Remote {
+     /// `target` is a port (`7979`) or `host:port`.
+     pub fn new(target: &str) -> Self {
+         let addr = if target.contains(':') { target.to_string() } else { format!("127.0.0.1:{target}") };
+-        Remote { addr, conn: None, next_id: 1 }
++        Remote { addr, conn: None, next_id: 1, token: None }
+     }
+ 
++    pub fn with_token(mut self, token: &str) -> std::io::Result<Self> {
++        self.token = Some(control_auth::validate_token(token)?);
++        self.conn = None;
++        Ok(self)
++    }
+     fn connect(&mut self) -> Result<(), String> {
+         if self.conn.is_some() {
+             return Ok(());
+         }
+         let sock = self.addr.parse().map_err(|e| format!("{}: {e}", self.addr))?;
+-        let s =
++        let mut s =
+             TcpStream::connect_timeout(&sock, Duration::from_millis(800)).map_err(|e| format!("cannot reach SoundCraft at {}: {e}", self.addr))?;
++        let token = self.token.clone().map(Ok).unwrap_or_else(control_auth::token_from_env).map_err(|e| e.to_string())?;
++        control_auth::authenticate_client(&mut s, &token).map_err(|e| e.to_string())?;
+         s.set_read_timeout(Some(Duration::from_secs(120))).map_err(|e| e.to_string())?;
+         let r = s.try_clone().map_err(|e| e.to_string())?;
+         self.conn = Some((s, BufReader::new(r)));
+diff --git a/crates/vst3-host/src/lib.rs b/crates/vst3-host/src/lib.rs
+index 0cfd3ab..fb26ea5 100644
+--- a/crates/vst3-host/src/lib.rs
++++ b/crates/vst3-host/src/lib.rs
+@@ -303,14 +303,14 @@ mod tests {
+         } else {
+             ["/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib/libz.so.1", "/lib64/libz.so.1"].iter().map(PathBuf::from).find(|p| p.exists())
+         };
+-        let Some(lib) = lib else { return };
++        let Some(_lib) = lib else { return };
+         let d = std::env::temp_dir().join(format!("soundcraft-vst3-nolib-{}", std::process::id()));
+         let _ = std::fs::remove_dir_all(&d);
+         std::fs::create_dir_all(&d).unwrap();
+         // Point a single-file ".vst3" at it via a symlink (no copying of binaries).
+         #[cfg(unix)]
+         {
+-            std::os::unix::fs::symlink(&lib, d.join("z.vst3")).unwrap();
++            std::os::unix::fs::symlink(&_lib, d.join("z.vst3")).unwrap();
+             let e = load_bundle(&d.join("z.vst3")).unwrap_err();
+             assert!(e.to_string().contains("not a VST3 plugin"), "{e}");
+         }
+diff --git a/docs/control-authentication.md b/docs/control-authentication.md
+new file mode 100644
+index 0000000..c2ed839
+--- /dev/null
++++ b/docs/control-authentication.md
+@@ -0,0 +1,5 @@
++# Native control authentication
++
++The optional loopback control server requires `SOUNDCRAFT_CONTROL_TOKEN` in both the desktop app and its CLI/MCP client. Use a private, randomly generated 32-byte token, encoded as exactly 64 hexadecimal characters. Keep it out of command lines, logs, source control and shared configuration. Missing or invalid credentials disable the listener. Headless operation does not require a token.
++
++External clients must send `{"id":0,"method":"auth","params":{"token":"<private token>"}}` as the first JSON line on every connection and reconnect, then read the successful `ok` response before sending commands. Authentication frames are limited to 4096 bytes and must complete within five seconds. The native clients perform this handshake automatically and reject non-loopback peers. Existing clients need this handshake before using a patched app.

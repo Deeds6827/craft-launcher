@@ -1,0 +1,3 @@
+# Verification inputs are checked by SHA-256 and must retain their exact bytes.
+security-verification/** -text
+security-verification/patches/*.patch binary

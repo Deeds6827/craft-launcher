@@ -1,0 +1,112 @@
+name: ArtCraft security verification
+
+on:
+  push:
+    branches: ['codex/security-verification-*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify ${{ matrix.app }}
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        app: [cadcraft, gridcraft, soundcraft, deckcraft, vectorcraft, designcraft, effectcraft, filmcraft, lightcraft, wordcraft, pdfcraft, craft-launcher]
+    env:
+      APP: ${{ matrix.app }}
+      VERIFY_COMMIT: ${{ github.sha }}
+      VERIFY_REPOSITORY: ${{ github.repository }}
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the verified Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt --target wasm32-unknown-unknown
+          rustup default 1.97.1
+          "CARGO_TARGET_DIR=$env:RUNNER_TEMP/target" >> $env:GITHUB_ENV
+      - name: Install PDF dependency checker
+        if: matrix.app == 'pdfcraft'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Apply the exact candidate to its original source commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $source = Join-Path $env:RUNNER_TEMP 'source'
+          if ($env:APP -eq 'craft-launcher') {
+            $repository = "https://github.com/$env:VERIFY_REPOSITORY.git"
+            $base = $env:VERIFY_COMMIT
+          } else {
+            $manifest = Get-Content security-verification/patches/manifest.json -Raw | ConvertFrom-Json
+            $row = @($manifest | Where-Object { $_.repository -eq $env:APP })
+            if ($row.Count -ne 1) { throw 'Expected exactly one source manifest entry' }
+            $row = $row[0]
+            $base = $row.baseCommit
+            $repository = "https://github.com/storytold/$env:APP.git"
+            $patch = Join-Path $env:GITHUB_WORKSPACE "security-verification/patches/$env:APP.patch"
+            $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $patch).Hash.ToLowerInvariant()
+            if ($digest -ne $row.sha256) { throw 'Candidate patch checksum mismatch' }
+          }
+          if ($base -notmatch '^[0-9a-f]{40}$') { throw 'Invalid immutable source revision' }
+          git init $source
+          git -C $source config core.autocrlf false
+          git -C $source remote add origin $repository
+          git -C $source fetch --depth=1 origin $base
+          git -C $source checkout --detach FETCH_HEAD
+          if ($env:APP -ne 'craft-launcher') {
+            git -C $source apply --check $patch
+            git -C $source apply $patch
+            git -C $source diff --check
+          }
+          "VERIFY_SOURCE=$source" >> $env:GITHUB_ENV
+          "VERIFY_BASE=$base" >> $env:GITHUB_ENV
+          if ($env:APP -ne 'craft-launcher') { "VERIFY_PATCH_SHA=$digest" >> $env:GITHUB_ENV }
+      - name: Run all required repository checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Set-Location -LiteralPath $env:VERIFY_SOURCE
+          $log = Join-Path $env:RUNNER_TEMP 'ci.log'
+          cargo xtask ci 2>&1 | Tee-Object -FilePath $log
+          $result = $LASTEXITCODE
+          $record = [ordered]@{
+            repository = $env:APP
+            baseCommit = $env:VERIFY_BASE
+            verificationCommit = $env:VERIFY_COMMIT
+            patchSHA256 = $env:VERIFY_PATCH_SHA
+            command = @('cargo', 'xtask', 'ci')
+            exitCode = $result
+            debugSymbols = $false
+            compilationJobs = 2
+          }
+          $record | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'result.json')
+          if ($result -ne 0) { throw "Repository CI failed with exit code $result" }
+      - name: Retain exact verification output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verification-${{ matrix.app }}
+          path: |
+            ${{ runner.temp }}/ci.log
+            ${{ runner.temp }}/result.json
+          if-no-files-found: warn
+          retention-days: 30
