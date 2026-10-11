@@ -39,7 +39,7 @@
     "repository": "soundcraft",
     "upstream": "https://github.com/storytold/soundcraft",
     "baseCommit": "4410486fc21561a9db0dc33961a2017469127e0d",
-    "fixedCommit": null,
+    "fixedCommit": "99e0f83c2ad0df36520fcb5e2706623931a16570",
     "patch": "soundcraft.patch",
     "sha256": "863c4b91e3ef40b24f90581372da0fb1ecaf45463ee853a7dbd6f5d0ead555db",
     "files": [
@@ -75,7 +75,7 @@
     "repository": "vectorcraft",
     "upstream": "https://github.com/storytold/vectorcraft",
     "baseCommit": "10f1c56a861869936af0027cef14b1cf5d8cf515",
-    "fixedCommit": null,
+    "fixedCommit": "c9e04d581ce582152eaab40450221c74916d71dc",
     "patch": "vectorcraft.patch",
     "sha256": "a9fd3bc9b36ddbd230dd7e62e3354befdbd6807686738576c9b80db238069a73",
     "files": [
@@ -115,9 +115,10 @@
     "baseCommit": "f953cd2855bf36beffa6a4d608e9bf4b226e9442",
     "fixedCommit": null,
     "patch": "effectcraft.patch",
-    "sha256": "ef08083b7cdc562a4cb97a30252476d5e4aa316b3136d504dc2c1b92ab551246",
+    "sha256": "a1293a165c1ab4e010b1bfd9f33271692c5353b6bf9223acaa65f0ecf48c90bc",
     "files": [
       "Cargo.lock",
+      "apps/effectcraft-cli/tests/cli.rs",
       "apps/effectcraft/Cargo.toml",
       "apps/effectcraft/src/control_server.rs",
       "crates/automation/src/backend.rs",
@@ -149,7 +150,7 @@
     "repository": "lightcraft",
     "upstream": "https://github.com/storytold/lightcraft",
     "baseCommit": "9e6c4c6fc9c7a7f192ce846c00ceb531e0f64dda",
-    "fixedCommit": null,
+    "fixedCommit": "76a375a49d0e6d281795d0cb0330d6adc0431a6f",
     "patch": "lightcraft.patch",
     "sha256": "bb44336e3f104ae020cf72238583c1d935007e837d3f109ba12b6676a8f20b33",
     "files": [
@@ -183,14 +184,16 @@
     "repository": "pdfcraft",
     "upstream": "https://github.com/storytold/pdfcraft",
     "baseCommit": "53a5880386789fc3531e54f6e6ffdef9a8e41f1a",
-    "fixedCommit": null,
+    "fixedCommit": "27c42a0568892baf664623f0bd093793a426241d",
     "patch": "pdfcraft.patch",
-    "sha256": "c2a61ab69254dd14669395de2dc4d7e218785339b9af9515deedc97d5ff6a520",
+    "sha256": "a83225246d5b88b1210d2deea56f139a4c4a154003f4183d3cb37579ec65555c",
     "files": [
+      "crates/automation/tests/hostile_args.rs",
       "crates/js/src/lib.rs",
       "crates/js/src/tests.rs",
       "crates/ui-egui/src/control.rs",
-      "crates/ui-egui/tests/control.rs"
+      "crates/ui-egui/tests/control.rs",
+      "parity/acrobat-features.toml"
     ]
   }
 ]
