@@ -17,7 +17,7 @@ jobs:
       max-parallel: 12
       matrix:
         # Focused follow-ups preserve the other immutable candidate runs.
-        app: ${{ contains(github.event.head_commit.message, '[verify:codecs]') && fromJSON('["effectcraft","filmcraft"]') || contains(github.event.head_commit.message, '[verify:effectcraft]') && fromJSON('["effectcraft"]') || contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || contains(github.event.head_commit.message, '[verify:soundcraft]') && fromJSON('["soundcraft"]') || contains(github.event.head_commit.message, '[verify:lightcraft]') && fromJSON('["lightcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
+        app: ${{ contains(github.event.head_commit.message, '[verify:codecs]') && fromJSON('["effectcraft","filmcraft"]') || contains(github.event.head_commit.message, '[verify:filmcraft]') && fromJSON('["filmcraft"]') || contains(github.event.head_commit.message, '[verify:effectcraft]') && fromJSON('["effectcraft"]') || contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || contains(github.event.head_commit.message, '[verify:soundcraft]') && fromJSON('["soundcraft"]') || contains(github.event.head_commit.message, '[verify:lightcraft]') && fromJSON('["lightcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
     env:
       APP: ${{ matrix.app }}
       VERIFY_COMMIT: ${{ github.sha }}
@@ -113,6 +113,31 @@ jobs:
           $log = Join-Path $env:RUNNER_TEMP 'ci.log'
           cargo xtask ci 2>&1 | Tee-Object -FilePath $log
           $result = $LASTEXITCODE
+          $initialResult = $result
+          $nativeTestThreads = $null
+          $serialProbeResult = $null
+          $probeBinaryDigest = $null
+          $initialLog = Get-Content -LiteralPath $log -Raw
+          if ($env:APP -eq 'filmcraft' -and $result -ne 0 -and $initialLog.Contains('STATUS_ACCESS_VIOLATION') -and $initialLog.Contains('filmcraft-golden --test golden')) {
+            Copy-Item -LiteralPath $log -Destination (Join-Path $env:RUNNER_TEMP 'ci-parallel.log')
+            $binaries = @(Get-ChildItem -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release/deps') -Filter 'golden-*.exe')
+            if ($binaries.Count -ne 1) { throw 'Expected one exact failed graphics-test program' }
+            $test = $binaries[0].FullName
+            $probeBinaryDigest = (Get-FileHash -LiteralPath $test -Algorithm SHA256).Hash.ToLowerInvariant()
+            Push-Location -LiteralPath (Join-Path $env:VERIFY_SOURCE 'crates/golden')
+            try {
+              & $test --test-threads 1 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'shader-serial-probe.log')
+              $serialProbeResult = $LASTEXITCODE
+            } finally { Pop-Location }
+            if ((Get-FileHash -LiteralPath $test -Algorithm SHA256).Hash.ToLowerInvariant() -ne $probeBinaryDigest) { throw 'Graphics-test program changed during comparison' }
+            if ($serialProbeResult -eq 0) {
+              $env:RUST_TEST_THREADS = '1'
+              'RUST_TEST_THREADS=1' >> $env:GITHUB_ENV
+              $nativeTestThreads = 1
+              cargo xtask ci 2>&1 | Tee-Object -FilePath $log
+              $result = $LASTEXITCODE
+            }
+          }
           $record = [ordered]@{
             repository = $env:APP
             baseCommit = $env:VERIFY_BASE
@@ -122,6 +147,10 @@ jobs:
             exitCode = $result
             debugSymbols = $false
             compilationJobs = 4
+            nativeTestThreads = $nativeTestThreads
+            initialFullCheckExitCode = $initialResult
+            serialGraphicsProbeExitCode = $serialProbeResult
+            serialGraphicsProbeBinarySHA256 = $probeBinaryDigest
             releaseCodegenUnits = 16
             releaseLTO = 'false'
             shaderCompilerRelease = $env:VERIFY_DXC_RELEASE
@@ -174,5 +203,7 @@ jobs:
             ${{ runner.temp }}/shader-fxc.log
             ${{ runner.temp }}/shader-dxc.log
             ${{ runner.temp }}/shader-probe.json
+            ${{ runner.temp }}/ci-parallel.log
+            ${{ runner.temp }}/shader-serial-probe.log
           if-no-files-found: warn
           retention-days: 30
