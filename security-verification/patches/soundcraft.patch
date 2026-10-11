@@ -375,6 +375,36 @@ index 3ba07c6..a537ef6 100644
              return kResultOk;
          }
          kInvalidArgument
+diff --git a/crates/vst3-host/tests/module_exit_shutdown.rs b/crates/vst3-host/tests/module_exit_shutdown.rs
+index cc337c9..dca2591 100644
+--- a/crates/vst3-host/tests/module_exit_shutdown.rs
++++ b/crates/vst3-host/tests/module_exit_shutdown.rs
+@@ -1,6 +1,6 @@
+ //! A plugin that sets up state while in use (HALion Sonic does) needs its module exit before the
+ //! process exit tears that state down: `shutdown()` runs the exits up front, while an exit
+-//! handler comes too late (`harness = false`, see `module_exit.rs`). Each case runs in a child
++//! handler comes too late on Unix (`harness = false`, see `module_exit.rs`). Each case runs in a child
+ //! process with the fixture's late state on (`VST3_FIXTURE_LATE_STATE`); the fixture ends the
+ //! process with status 3 when its module exit comes after the teardown.
+ 
+@@ -38,7 +38,15 @@ fn main() {
+     assert!(up_front.status.success(), "shutdown before exit: {:?}\n{}", up_front.status, String::from_utf8_lossy(&up_front.stderr));
+     let too_late = run("exit-handler");
+     let err = String::from_utf8_lossy(&too_late.stderr);
+-    assert_eq!(too_late.status.code(), Some(3), "the exit handler alone comes too late: {err}");
+-    assert!(err.contains("module exit after the process exit tore down state"), "{err}");
++    #[cfg(unix)]
++    {
++        assert_eq!(too_late.status.code(), Some(3), "the exit handler alone comes too late: {err}");
++        assert!(err.contains("module exit after the process exit tore down state"), "{err}");
++    }
++    // Windows runs the fixture DLL's atexit callbacks at DLL unload, after the host's
++    // executable exit handler has called ExitDll. Both paths must exit cleanly there.
++    // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/atexit
++    #[cfg(windows)]
++    assert!(too_late.status.success(), "module exit before DLL teardown: {:?}\n{err}", too_late.status);
+     println!("module_exit_shutdown: ok");
+ }
 diff --git a/docs/control-authentication.md b/docs/control-authentication.md
 new file mode 100644
 index 0000000..c2ed839

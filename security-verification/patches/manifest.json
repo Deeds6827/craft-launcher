@@ -41,7 +41,7 @@
     "baseCommit": "4410486fc21561a9db0dc33961a2017469127e0d",
     "fixedCommit": null,
     "patch": "soundcraft.patch",
-    "sha256": "01c99c1ec20ad9bf3029eec15cfa0df5a893975c448850569abd363bf05210a2",
+    "sha256": "863c4b91e3ef40b24f90581372da0fb1ecaf45463ee853a7dbd6f5d0ead555db",
     "files": [
       "Cargo.lock",
       "apps/soundcraft/Cargo.toml",
@@ -50,6 +50,7 @@
       "crates/automation/src/lib.rs",
       "crates/vst3-host/src/lib.rs",
       "crates/vst3-host/tests/fixture/src/lib.rs",
+      "crates/vst3-host/tests/module_exit_shutdown.rs",
       "docs/control-authentication.md"
     ]
   },
