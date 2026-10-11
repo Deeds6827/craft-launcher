@@ -182,7 +182,7 @@
     "baseCommit": "53a5880386789fc3531e54f6e6ffdef9a8e41f1a",
     "fixedCommit": null,
     "patch": "pdfcraft.patch",
-    "sha256": "7596d4e5e99a479ac840f83ca58b441367118b5ba6750b9494b17a0d9264cc2f",
+    "sha256": "c2a61ab69254dd14669395de2dc4d7e218785339b9af9515deedc97d5ff6a520",
     "files": [
       "crates/js/src/lib.rs",
       "crates/js/src/tests.rs",

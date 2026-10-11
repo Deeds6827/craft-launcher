@@ -16,7 +16,8 @@ jobs:
       fail-fast: false
       max-parallel: 12
       matrix:
-        app: [cadcraft, gridcraft, soundcraft, deckcraft, vectorcraft, designcraft, effectcraft, filmcraft, lightcraft, wordcraft, pdfcraft, craft-launcher]
+        # A PDF-only follow-up preserves the other immutable candidate runs.
+        app: ${{ contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
     env:
       APP: ${{ matrix.app }}
       VERIFY_COMMIT: ${{ github.sha }}

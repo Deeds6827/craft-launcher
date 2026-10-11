@@ -1,5 +1,5 @@
 diff --git a/crates/js/src/lib.rs b/crates/js/src/lib.rs
-index fd6ff82..b309077 100644
+index fd6ff82..f0e9db7 100644
 --- a/crates/js/src/lib.rs
 +++ b/crates/js/src/lib.rs
 @@ -200,6 +200,44 @@ struct Host {
@@ -264,20 +264,24 @@ index fd6ff82..b309077 100644
      }));
      let mut out = Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), ..Default::default() };
      let result = (|| -> JsResult<()> {
-@@ -1139,7 +1284,11 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
+@@ -1139,7 +1284,15 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
          }
          let r = ctx.eval(Source::from_bytes(script))?;
          if !r.is_undefined() {
 -            out.result = Some(text(&r, &mut ctx)?);
 +            // Summarize oversized completion text explicitly; assignments to
 +            // legitimate large form values must still finish normally.
-+            let completion = bounded_host_string(&r.to_string(&mut ctx)?).unwrap_or_else(|| "[script completion exceeds message limit]".into());
++            let completion = if r.is_null() {
++                String::new()
++            } else {
++                bounded_host_string(&r.to_string(&mut ctx)?).unwrap_or_else(|| "[script completion exceeds message limit]".into())
++            };
 +            host(&ctx)?.borrow_mut().charge_output(completion.len())?;
 +            out.result = Some(completion);
          }
          let rc = ev.get(js_string!("rc"), &mut ctx)?;
          out.rc = rc.to_boolean();
-@@ -1150,7 +1299,7 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
+@@ -1150,7 +1303,7 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], d
          Ok(())
      })();
      if let Err(e) = result {
@@ -287,7 +291,7 @@ index fd6ff82..b309077 100644
      if let Some(h) = ctx.remove_data::<Shared>() {
          let h = h.into_inner();
 diff --git a/crates/js/src/tests.rs b/crates/js/src/tests.rs
-index cb8b997..33a82d6 100644
+index cb8b997..71efebf 100644
 --- a/crates/js/src/tests.rs
 +++ b/crates/js/src/tests.rs
 @@ -1,5 +1,50 @@
@@ -341,7 +345,7 @@ index cb8b997..33a82d6 100644
  fn fields() -> Vec<FieldState> {
      let mut agree = FieldState::new("agree", FieldType::CheckBox, vec![]);
      agree.options = vec![("Yes".into(), "Yes".into())];
-@@ -949,3 +994,64 @@ $host.gotoURL("https://example.org")"#,
+@@ -949,3 +994,75 @@ $host.gotoURL("https://example.org")"#,
          assert!(o.abandoned || o.error.is_some(), "{o:?}");
      }
  }
@@ -405,6 +409,17 @@ index cb8b997..33a82d6 100644
 +    }
 +    let out = go("throw new TypeError('ordinary failure')", &Event::doc("Open"));
 +    assert!(out.error.as_deref().is_some_and(|s| s.contains("TypeError: ordinary failure")));
++}
++
++#[test]
++fn completion_preserves_null_and_reentrant_coercion() {
++    let out = go("null", &Event::doc("Open"));
++    assert_eq!(out.error, None);
++    assert_eq!(out.result.as_deref(), Some(""));
++    let out = go("({toString(){app.alert('nested');return 'outer';}})", &Event::doc("Open"));
++    assert_eq!(out.error, None);
++    assert_eq!(out.result.as_deref(), Some("outer"));
++    assert_eq!(out.alerts, ["nested"]);
 +}
 diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
 index 67af806..11d3f65 100644
