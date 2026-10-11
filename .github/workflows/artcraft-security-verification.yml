@@ -17,7 +17,7 @@ jobs:
       max-parallel: 12
       matrix:
         # Focused follow-ups preserve the other immutable candidate runs.
-        app: ${{ contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || contains(github.event.head_commit.message, '[verify:soundcraft]') && fromJSON('["soundcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
+        app: ${{ contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || contains(github.event.head_commit.message, '[verify:soundcraft]') && fromJSON('["soundcraft"]') || contains(github.event.head_commit.message, '[verify:lightcraft]') && fromJSON('["lightcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
     env:
       APP: ${{ matrix.app }}
       VERIFY_COMMIT: ${{ github.sha }}

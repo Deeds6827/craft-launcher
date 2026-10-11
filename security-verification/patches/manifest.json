@@ -57,7 +57,7 @@
     "repository": "deckcraft",
     "upstream": "https://github.com/storytold/deckcraft",
     "baseCommit": "a98df49b21632d69a3da994d35df1ea91dab41af",
-    "fixedCommit": null,
+    "fixedCommit": "7e39341ffe95f12e63d981cf3f36b79019ff1b53",
     "patch": "deckcraft.patch",
     "sha256": "095ba5fb35e37d685df40f60acb364e8cea8049f97b9bcedb73aafbedca3c319",
     "files": [
@@ -94,7 +94,7 @@
     "repository": "designcraft",
     "upstream": "https://github.com/storytold/designcraft",
     "baseCommit": "a9124a0517594ce9872f73637e7b841a4967bcf9",
-    "fixedCommit": null,
+    "fixedCommit": "0b2f8e8c7677eccf8f3944d3076ffa9b959b29f0",
     "patch": "designcraft.patch",
     "sha256": "dfe1795f1012bb1db3d5ca8fb8733fa830dec80991f242b08f5cbfd7bc1ec768",
     "files": [
@@ -150,11 +150,12 @@
     "baseCommit": "9e6c4c6fc9c7a7f192ce846c00ceb531e0f64dda",
     "fixedCommit": null,
     "patch": "lightcraft.patch",
-    "sha256": "af5274eb7029de417e1744d3253f8ec25fa06181f631b5cbb580d6c1d72a4382",
+    "sha256": "bb44336e3f104ae020cf72238583c1d935007e837d3f109ba12b6676a8f20b33",
     "files": [
       "Cargo.lock",
       "apps/lightcraft/Cargo.toml",
       "apps/lightcraft/src/control_server.rs",
+      "crates/engine/src/tests_sync.rs",
       "crates/mcp/src/backend.rs",
       "crates/mcp/src/control_auth.rs",
       "crates/mcp/src/lib.rs",

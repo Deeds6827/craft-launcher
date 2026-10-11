@@ -136,6 +136,19 @@ index 16bd5df..2c1d785 100644
 +        worker.join().unwrap();
 +    }
 +}
+diff --git a/crates/engine/src/tests_sync.rs b/crates/engine/src/tests_sync.rs
+index 22dce0a..108d9a7 100644
+--- a/crates/engine/src/tests_sync.rs
++++ b/crates/engine/src/tests_sync.rs
+@@ -32,7 +32,7 @@ impl Scratch {
+         Scratch(dir)
+     }
+     fn path(&self, rel: &str) -> String {
+-        self.0.join(rel).to_string_lossy().to_string()
++        self.0.join(rel).components().collect::<PathBuf>().to_string_lossy().to_string()
+     }
+ }
+ 
 diff --git a/crates/mcp/src/backend.rs b/crates/mcp/src/backend.rs
 index 4772363..3c90958 100644
 --- a/crates/mcp/src/backend.rs
