@@ -11,18 +11,18 @@ jobs:
   verify:
     name: Verify ${{ matrix.app }}
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       max-parallel: 12
       matrix:
         # Focused follow-ups preserve the other immutable candidate runs.
-        app: ${{ contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || contains(github.event.head_commit.message, '[verify:soundcraft]') && fromJSON('["soundcraft"]') || contains(github.event.head_commit.message, '[verify:lightcraft]') && fromJSON('["lightcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
+        app: ${{ contains(github.event.head_commit.message, '[verify:codecs]') && fromJSON('["effectcraft","filmcraft"]') || contains(github.event.head_commit.message, '[verify:pdfcraft]') && fromJSON('["pdfcraft"]') || contains(github.event.head_commit.message, '[verify:soundcraft]') && fromJSON('["soundcraft"]') || contains(github.event.head_commit.message, '[verify:lightcraft]') && fromJSON('["lightcraft"]') || fromJSON('["cadcraft","gridcraft","soundcraft","deckcraft","vectorcraft","designcraft","effectcraft","filmcraft","lightcraft","wordcraft","pdfcraft","craft-launcher"]') }}
     env:
       APP: ${{ matrix.app }}
       VERIFY_COMMIT: ${{ github.sha }}
       VERIFY_REPOSITORY: ${{ github.repository }}
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: '4'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_TERM_COLOR: never
@@ -97,7 +97,7 @@ jobs:
             command = @('cargo', 'xtask', 'ci')
             exitCode = $result
             debugSymbols = $false
-            compilationJobs = 2
+            compilationJobs = 4
           }
           $record | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'result.json')
           if ($result -ne 0) { throw "Repository CI failed with exit code $result" }
