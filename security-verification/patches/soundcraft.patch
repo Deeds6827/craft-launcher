@@ -353,6 +353,28 @@ index 0cfd3ab..fb26ea5 100644
              let e = load_bundle(&d.join("z.vst3")).unwrap_err();
              assert!(e.to_string().contains("not a VST3 plugin"), "{e}");
          }
+diff --git a/crates/vst3-host/tests/fixture/src/lib.rs b/crates/vst3-host/tests/fixture/src/lib.rs
+index 3ba07c6..a537ef6 100644
+--- a/crates/vst3-host/tests/fixture/src/lib.rs
++++ b/crates/vst3-host/tests/fixture/src/lib.rs
+@@ -52,7 +52,7 @@ fn audio_bus(bus: *mut BusInfo, dir: BusDirection, name: &str) {
+     b.channelCount = 2;
+     copy_c16(name, &mut b.name);
+     b.busType = BusTypes_::kMain as BusType;
+-    b.flags = BusInfo_::BusFlags_::kDefaultActive;
++    b.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+ }
+ 
+ unsafe fn channels<'a>(bus: &AudioBusBuffers, frames: usize) -> Vec<&'a mut [f32]> {
+@@ -461,7 +461,7 @@ impl IComponentTrait for Synth {
+             b.channelCount = 16;
+             copy_c16("Notes", &mut b.name);
+             b.busType = BusTypes_::kMain as BusType;
+-            b.flags = BusInfo_::BusFlags_::kDefaultActive;
++            b.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+             return kResultOk;
+         }
+         kInvalidArgument
 diff --git a/docs/control-authentication.md b/docs/control-authentication.md
 new file mode 100644
 index 0000000..c2ed839

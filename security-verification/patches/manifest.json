@@ -21,7 +21,7 @@
     "repository": "gridcraft",
     "upstream": "https://github.com/storytold/gridcraft",
     "baseCommit": "9f896c1249f40d18bf182199dc03042959be5f3f",
-    "fixedCommit": null,
+    "fixedCommit": "02e6d95aa698b891dcca0be56ed6509fdb2fcce1",
     "patch": "gridcraft.patch",
     "sha256": "70687f2701486e94c8899041496c1710ee3d3951ef74d1817f35476a62d9c03e",
     "files": [
@@ -41,7 +41,7 @@
     "baseCommit": "4410486fc21561a9db0dc33961a2017469127e0d",
     "fixedCommit": null,
     "patch": "soundcraft.patch",
-    "sha256": "96bf40403729f351be92f60fddbf73edc31b85e8cba35983773ded16942c56ed",
+    "sha256": "01c99c1ec20ad9bf3029eec15cfa0df5a893975c448850569abd363bf05210a2",
     "files": [
       "Cargo.lock",
       "apps/soundcraft/Cargo.toml",
@@ -49,6 +49,7 @@
       "crates/automation/src/control_auth.rs",
       "crates/automation/src/lib.rs",
       "crates/vst3-host/src/lib.rs",
+      "crates/vst3-host/tests/fixture/src/lib.rs",
       "docs/control-authentication.md"
     ]
   },
