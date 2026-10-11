@@ -192,6 +192,21 @@ jobs:
             shaderCompilerRelease = $env:VERIFY_DXC_RELEASE
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'shader-probe.json')
           if ($withDxc -ne 0) { throw 'Graphics tests failed with maintained shader compiler' }
+      - name: Diagnose remaining native tests after a failed full check
+        if: failure() && (matrix.app == 'filmcraft' || matrix.app == 'effectcraft')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Set-Location -LiteralPath $env:VERIFY_SOURCE
+          cargo test --workspace --release --no-fail-fast 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'all-native-failures.log')
+          [ordered]@{
+            command = @('cargo','test','--workspace','--release','--no-fail-fast')
+            exitCode = $LASTEXITCODE
+            verificationCommit = $env:VERIFY_COMMIT
+            patchSHA256 = $env:VERIFY_PATCH_SHA
+            diagnosticOnly = $true
+          } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'all-native-failures.json')
       - name: Retain exact verification output
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -199,6 +214,8 @@ jobs:
           name: verification-${{ matrix.app }}
           path: |
             ${{ runner.temp }}/ci.log
+            ${{ runner.temp }}/all-native-failures.log
+            ${{ runner.temp }}/all-native-failures.json
             ${{ runner.temp }}/result.json
             ${{ runner.temp }}/shader-fxc.log
             ${{ runner.temp }}/shader-dxc.log

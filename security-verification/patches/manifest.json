@@ -115,7 +115,7 @@
     "baseCommit": "f953cd2855bf36beffa6a4d608e9bf4b226e9442",
     "fixedCommit": null,
     "patch": "effectcraft.patch",
-    "sha256": "a1293a165c1ab4e010b1bfd9f33271692c5353b6bf9223acaa65f0ecf48c90bc",
+    "sha256": "5ce1904fc4c2b44660804a965d4d0f565d1c8b79c0156db28f93545c86716782",
     "files": [
       "Cargo.lock",
       "apps/effectcraft-cli/tests/cli.rs",
@@ -126,6 +126,9 @@
       "crates/automation/src/control_auth.rs",
       "crates/automation/src/lib.rs",
       "crates/automation/src/tests.rs",
+      "crates/engine/src/footage_check.rs",
+      "crates/engine/src/rq_tests.rs",
+      "crates/engine/src/tests_stubs.rs",
       "docs/control-authentication.md"
     ]
   },

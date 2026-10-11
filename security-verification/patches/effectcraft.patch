@@ -416,6 +416,173 @@ index 37de10a..15e5cc8 100644
      let r = rpc(&mut s, 1, "initialize", json!({}));
      assert!(r["serverInfo"]["title"].as_str().unwrap().contains("bridge"));
      let names: Vec<String> =
+diff --git a/crates/engine/src/footage_check.rs b/crates/engine/src/footage_check.rs
+index f5db284..e25b15f 100644
+--- a/crates/engine/src/footage_check.rs
++++ b/crates/engine/src/footage_check.rs
+@@ -200,7 +200,7 @@ mod tests {
+     fn relative_footage_is_found_next_to_the_project() {
+         let dir = std::env::temp_dir().join(format!("ec-relative-{}", std::process::id()));
+         std::fs::create_dir_all(dir.join("media")).unwrap();
+-        let clip = dir.join("media").join("ec-relative-clip.png");
++        let clip = dir.join("media/ec-relative-clip.png");
+         std::fs::write(&clip, b"x").unwrap();
+         let mut s = session_with(&["media/ec-relative-clip.png", "/nonexistent/ec/abs.png", "media/ec-relative-gone.png"]);
+         let path = dir.join("p.ecproj");
+diff --git a/crates/engine/src/rq_tests.rs b/crates/engine/src/rq_tests.rs
+index fe37666..e1e7b93 100644
+--- a/crates/engine/src/rq_tests.rs
++++ b/crates/engine/src/rq_tests.rs
+@@ -9,6 +9,11 @@ use serde_json::json;
+ use crate::render_queue::CANCELLED;
+ use crate::{Event, ExportJob, ExportResult, Exporter, Session};
+ 
++// Mock exports need a fully qualified native path, not a Unix-rooted path on Windows.
++pub(crate) fn native_output_path(relative: &str) -> std::path::PathBuf {
++    std::env::temp_dir().join(format!("effectcraft-render-fixture-{}", std::process::id())).join(relative).components().collect()
++}
++
+ fn demo() -> Session {
+     let mut s = Session::default();
+     s.execute("file.openDemoProject", json!({})).unwrap();
+@@ -67,24 +72,24 @@ fn add_configure_render() {
+     let r = s.execute("renderQueue.setOutputModule", json!({"item": id, "format": "png", "channels": "rgba"})).unwrap();
+     assert!(r["outputPath"].as_str().unwrap().ends_with("_[#####].png"), "{r}");
+     assert!(s.execute("renderQueue.setOutputModule", json!({"item": id, "format": "jpeg", "channels": "rgba"})).is_err());
+-    let r = s.execute("renderQueue.setOutput", json!({"item": id, "path": "/tmp/rq/out.mov"})).unwrap();
++    let r = s.execute("renderQueue.setOutput", json!({"item": id, "path": native_output_path("rq/out.mov")})).unwrap();
+     assert_eq!(r["output"]["format"], "ProRes", "Output To with .mov switches to ProRes");
+-    assert_eq!(std::path::Path::new(r["outputPath"].as_str().unwrap()), std::path::absolute("/tmp/rq/out.mov").unwrap());
++    assert_eq!(std::path::Path::new(r["outputPath"].as_str().unwrap()), native_output_path("rq/out.mov"));
+     // A second item that fails, a third that is unqueued.
+-    let b = s.execute("renderQueue.add", json!({"format": "gif", "output": "/tmp/rq/fail.gif"})).unwrap();
+-    let c = s.execute("renderQueue.add", json!({"output": "/tmp/rq/skip.mp4"})).unwrap();
++    let b = s.execute("renderQueue.add", json!({"format": "gif", "output": native_output_path("rq/fail.gif")})).unwrap();
++    let c = s.execute("renderQueue.add", json!({"output": native_output_path("rq/skip.mp4")})).unwrap();
+     s.execute("renderQueue.setRender", json!({"item": c["item"], "render": false})).unwrap();
+     assert_eq!(s.project.render_queue[2].status.label(), "Unqueued");
+     let r = s.execute("renderQueue.render", json!({})).unwrap();
+     assert_eq!(r["items"].as_array().unwrap().len(), 2);
+     assert_eq!(
+         ex.log.lock().unwrap().iter().map(std::path::PathBuf::from).collect::<Vec<_>>(),
+-        [std::path::absolute("/tmp/rq/out.mov").unwrap(), std::path::absolute("/tmp/rq/fail.gif").unwrap()]
++        [native_output_path("rq/out.mov"), native_output_path("rq/fail.gif")]
+     );
+     let q = &s.project.render_queue;
+     assert_eq!(q[0].status.label(), "Done");
+     assert!(q[0].started.is_some() && q[0].render_time.is_some());
+-    assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), std::path::absolute("/tmp/rq/out.mov").unwrap());
++    assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), native_output_path("rq/out.mov"));
+     assert_eq!(q[1].status, RenderStatus::Failed("boom".into()));
+     assert_eq!(q[2].status.label(), "Unqueued");
+     assert!(s.drain_events().iter().any(|e| matches!(e, Event::Toast { error: true, .. })));
+diff --git a/crates/engine/src/tests_stubs.rs b/crates/engine/src/tests_stubs.rs
+index 46d5d17..52ac2d7 100644
+--- a/crates/engine/src/tests_stubs.rs
++++ b/crates/engine/src/tests_stubs.rs
+@@ -4,6 +4,8 @@
+ 
+ use std::sync::{Arc, Mutex};
+ 
++use crate::rq_tests::native_output_path;
++
+ use effectcraft_keyframe::Value as KV;
+ use effectcraft_project::render_queue::{OutputFormat, PostRenderAction};
+ use effectcraft_project::{FeatherFalloff, Footage, FootageKind, GroupKind, LayerId, LayerSource, MaskMotionBlur};
+@@ -274,14 +276,14 @@ fn rq() -> (Session, Arc<MockExporter>) {
+ fn add_output_module_encodes_twice() {
+     let (mut s, ex) = rq();
+     assert!(!s.is_enabled("render.addOutputModule"));
+-    s.execute("renderQueue.add", json!({"output": "/tmp/om/main.mp4"})).unwrap();
++    s.execute("renderQueue.add", json!({"output": native_output_path("om/main.mp4")})).unwrap();
+     let r = s.execute("render.addOutputModule", json!({"format": "png"})).unwrap();
+     assert_eq!(r["module"], 2);
+     assert_eq!(r["outputModules"], 2);
+     let extra = r["extraOutputs"][0]["outputPath"].as_str().unwrap().to_string();
+     assert!(extra.ends_with(".png"), "{extra}");
+     // Module 2 is editable on its own.
+-    s.execute("renderQueue.setOutput", json!({"index": 1, "module": 2, "path": "/tmp/om/second.mov"})).unwrap();
++    s.execute("renderQueue.setOutput", json!({"index": 1, "module": 2, "path": native_output_path("om/second.mov")})).unwrap();
+     assert!(s.execute("renderQueue.setOutput", json!({"index": 1, "module": 3, "path": "/tmp/x.mov"})).is_err());
+     s.execute("renderQueue.render", json!({})).unwrap();
+     assert_eq!(
+@@ -294,10 +296,10 @@ fn add_output_module_encodes_twice() {
+                 (format.to_string(), std::path::PathBuf::from(path))
+             })
+             .collect::<Vec<_>>(),
+-        [("H264".to_string(), std::path::absolute("/tmp/om/main.mp4").unwrap()), ("ProRes".to_string(), std::path::absolute("/tmp/om/second.mov").unwrap())]
++        [("H264".to_string(), native_output_path("om/main.mp4")), ("ProRes".to_string(), native_output_path("om/second.mov"))]
+     );
+     assert_eq!(s.project.render_queue[0].status.label(), "Done");
+-    assert_eq!(std::path::Path::new(s.project.render_queue[0].last_output.as_deref().unwrap()), std::path::absolute("/tmp/om/main.mp4").unwrap());
++    assert_eq!(std::path::Path::new(s.project.render_queue[0].last_output.as_deref().unwrap()), native_output_path("om/main.mp4"));
+     s.execute("edit.undo", json!({})).unwrap();
+     assert_eq!(s.project.render_queue[0].extra_outputs.len(), 1, "undo the Output To edit");
+ }
+@@ -311,7 +313,7 @@ fn pre_render_imports_and_replaces() {
+     let outer = s.active_comp_id().unwrap();
+     s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+     s.open_comp(inner);
+-    let r = s.execute("render.preRender", json!({"output": "/tmp/pre/inner.mov"})).unwrap();
++    let r = s.execute("render.preRender", json!({"output": native_output_path("pre/inner.mov")})).unwrap();
+     assert_eq!(r["postRenderAction"], "Import & Replace Usage");
+     assert_eq!(s.project.render_queue[0].post_render, PostRenderAction::ImportAndReplace);
+     s.execute("renderQueue.render", json!({})).unwrap();
+@@ -319,7 +321,7 @@ fn pre_render_imports_and_replaces() {
+     let l = &s.project.comp(outer).unwrap().layers[0];
+     let LayerSource::Footage { item } = l.source else { panic!("not replaced: {:?}", l.source) };
+     assert!(
+-        matches!(&s.project.item(item).unwrap().kind, effectcraft_project::ItemKind::Footage(f) if std::path::Path::new(&f.path) == std::path::absolute("/tmp/pre/inner.mov").unwrap())
++        matches!(&s.project.item(item).unwrap().kind, effectcraft_project::ItemKind::Footage(f) if std::path::Path::new(&f.path) == native_output_path("pre/inner.mov"))
+     );
+     s.execute("edit.undo", json!({})).unwrap();
+     assert!(matches!(s.project.comp(outer).unwrap().layers[0].source, LayerSource::Comp { .. }));
+@@ -331,23 +333,26 @@ fn post_render_actions_import_and_set_proxy() {
+     let cid = s.active_comp_id().unwrap();
+     let items_before = s.project.items.len();
+     // Import: the rendered file becomes a footage item.
+-    let a = s.execute("renderQueue.add", json!({"output": "/tmp/post/a.mov"})).unwrap();
++    let a = s.execute("renderQueue.add", json!({"output": native_output_path("post/a.mov")})).unwrap();
+     s.execute("renderQueue.setOutputModule", json!({"item": a["item"], "postRenderAction": "import"})).unwrap();
+     assert_eq!(s.project.render_queue[0].post_render, PostRenderAction::Import);
+     s.execute("renderQueue.render", json!({})).unwrap();
+     assert_eq!(s.project.items.len(), items_before + 1);
+-    assert!(s.project.items.values().any(
+-        |i| matches!(&i.kind, effectcraft_project::ItemKind::Footage(f) if std::path::Path::new(&f.path) == std::path::absolute("/tmp/post/a.mov").unwrap())
+-    ));
++    assert!(
++        s.project
++            .items
++            .values()
++            .any(|i| matches!(&i.kind, effectcraft_project::ItemKind::Footage(f) if std::path::Path::new(&f.path) == native_output_path("post/a.mov")))
++    );
+     // Set Proxy: the comp gets the render as its proxy.
+-    let b = s.execute("renderQueue.add", json!({"output": "/tmp/post/b.mov"})).unwrap();
++    let b = s.execute("renderQueue.add", json!({"output": native_output_path("post/b.mov")})).unwrap();
+     s.execute("renderQueue.setOutputModule", json!({"item": b["item"], "postRenderAction": "Set Proxy"})).unwrap();
+     s.execute("renderQueue.render", json!({})).unwrap();
+     let px = s.project.item(cid).unwrap().proxy.clone().expect("proxy set");
+-    assert_eq!(std::path::Path::new(&px.footage.path), std::path::absolute("/tmp/post/b.mov").unwrap());
++    assert_eq!(std::path::Path::new(&px.footage.path), native_output_path("post/b.mov"));
+     // None: nothing happens.
+     let n = s.project.items.len();
+-    let c = s.execute("renderQueue.add", json!({"output": "/tmp/post/c.mov"})).unwrap();
++    let c = s.execute("renderQueue.add", json!({"output": native_output_path("post/c.mov")})).unwrap();
+     s.execute("renderQueue.setOutputModule", json!({"item": c["item"], "postRenderAction": "none"})).unwrap();
+     s.execute("renderQueue.render", json!({})).unwrap();
+     assert_eq!(s.project.items.len(), n);
+@@ -426,9 +431,9 @@ fn save_frame_as_queues_with_the_frame_defaults() {
+ #[test]
+ fn log_notify_and_overflow_settings() {
+     let (mut s, _) = rq();
+-    let a = s.execute("renderQueue.add", json!({"output": "/tmp/n/a.mp4", "log": "plusPerFrameInfo"})).unwrap();
++    let a = s.execute("renderQueue.add", json!({"output": native_output_path("n/a.mp4"), "log": "plusPerFrameInfo"})).unwrap();
+     assert_eq!(a["logLabel"], "Plus Per Frame Info");
+-    assert_eq!(std::path::Path::new(a["logPath"].as_str().unwrap()), std::path::absolute("/tmp/n/a_RenderLog.txt").unwrap());
++    assert_eq!(std::path::Path::new(a["logPath"].as_str().unwrap()), native_output_path("n/a_RenderLog.txt"));
+     s.execute("renderQueue.setLog", json!({"item": a["item"], "log": "plusSettings"})).unwrap();
+     assert_eq!(s.project.render_queue[0].log, effectcraft_project::render_queue::RenderLog::PlusSettings);
+     s.execute("renderQueue.setOverflowFolders", json!({"folders": ["/tmp/o1", " ", "/tmp/o2"]})).unwrap();
 diff --git a/docs/control-authentication.md b/docs/control-authentication.md
 new file mode 100644
 index 0000000..47aad2d
